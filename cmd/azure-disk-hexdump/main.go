@@ -13,15 +13,19 @@ import (
 )
 
 func main() {
-	urlValue := flag.String("url", "", "snapshot export SAS URL")
+	urlValue := flag.String("url", "", "snapshot export SAS URL (prefer AZURE_SAS_URL)")
 	offset := flag.Int64("offset", 0, "byte offset")
 	length := flag.Int("length", 512, "number of bytes")
 	flag.Parse()
+	if *urlValue == "" {
+		*urlValue = os.Getenv("AZURE_SAS_URL")
+	}
 	if *urlValue == "" && flag.NArg() > 0 {
 		*urlValue = flag.Arg(0)
 	}
 	if *urlValue == "" {
-		fmt.Fprintln(os.Stderr, "usage: azure-disk-hexdump -url SAS_URL [-offset N] [-length N]")
+		fmt.Fprintln(os.Stderr, "usage: AZURE_SAS_URL='...' azure-disk-hexdump [-offset N] [-length N]")
+		fmt.Fprintln(os.Stderr, "       azure-disk-hexdump -url SAS_URL [-offset N] [-length N] (legacy)")
 		os.Exit(2)
 	}
 	if *offset < 0 || *length < 0 {

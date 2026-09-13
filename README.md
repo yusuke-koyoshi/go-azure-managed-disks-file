@@ -61,6 +61,38 @@ if err != nil {
 defer cleanup() // RevokeAccess
 ```
 
+Use `snapshot.GrantAccessAndOpenWithOptions` when the SAS duration or
+revocation behavior needs to be configured (with `time` imported):
+
+```go
+sr, cleanup, err := snapshot.GrantAccessAndOpenWithOptions(ctx, cred, resourceID, cache, snapshot.Options{
+    Duration: 45 * time.Minute,
+})
+```
+
+`Duration: 0` uses a 20-minute SAS. Both `GrantAccessAndOpen` and
+`GrantAccessAndOpenWithOptions` pre-revoke an existing active SAS and revoke
+the newly granted SAS during cleanup by default. Set
+`SkipPreRevokeActiveSAS` or `SkipRevokeOnCleanup` only to explicitly opt out.
+
+When a cache is shared between readers, the cache key includes the blob
+identifier. Implementations that do not expose `BlobIdentifier` receive a
+unique per-reader identifier, so those readers deliberately do not share
+cached blocks. Provide a stable identifier when cross-reader cache reuse is
+desired.
+
+`OpenWithOptions` can set `MaxConcurrentBlocks` to bound in-flight range
+requests (the default is unlimited) and `PrefetchBlocks` to enable
+cancellable read-ahead.
+
+The verification CLI accepts its SAS URL from `AZURE_SAS_URL` (preferred, so
+the URL is not placed in the command line), while the legacy `-url` flag and
+positional argument remain supported:
+
+```sh
+AZURE_SAS_URL='https://...' go run ./cmd/azure-disk-hexdump -offset 0 -length 512
+```
+
 ## Packages
 
 | Package | Role | Dependencies |
