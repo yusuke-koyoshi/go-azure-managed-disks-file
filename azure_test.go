@@ -4,12 +4,19 @@ import (
 	"bytes"
 	"context"
 	"crypto/md5"
+	"encoding/base64"
 	"errors"
+	"fmt"
 	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
 )
 
 type testBlob struct {
@@ -405,6 +412,66 @@ func TestOpenMaxConcurrentBlocks(t *testing.T) {
 	}
 }
 
+func TestPrefetchDoesNotFollowRandomAccess(t *testing.T) {
+	const blockSize = 4
+	data := bytes.Repeat([]byte("x"), 64)
+	api := &testBlob{id: "random", data: data}
+	reader, err := OpenWithOptions(context.Background(), api, nil, OpenOptions{
+		BlockSize:      blockSize,
+		PrefetchBlocks: 4,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The first read is always treated as sequential, so start on the final
+	// block: read-ahead stops at the end of the blob and spawns no request.
+	// Every later offset is non-adjacent, so the request count is exactly the
+	// number of distinct blocks touched.
+	offsets := []int64{60, 0, 32, 8, 48, 16}
+	buf := make([]byte, blockSize)
+	for _, off := range offsets {
+		if _, err := reader.ReadAt(buf, off); err != nil {
+			t.Fatalf("ReadAt(%d): %v", off, err)
+		}
+	}
+	if got := api.requests.Load(); got != int64(len(offsets)) {
+		t.Fatalf("ReadRange calls = %d, want %d", got, len(offsets))
+	}
+}
+
+func BenchmarkReadAtPrefetch(b *testing.B) {
+	const blockSize = 1 << 10
+	data := bytes.Repeat([]byte("x"), 256*blockSize)
+	blocks := int64(len(data) / blockSize)
+	for _, bench := range []struct {
+		name   string
+		offset func(i int64) int64
+	}{
+		{name: "sequential", offset: func(i int64) int64 { return (i % blocks) * blockSize }},
+		// A stride coprime with the block count visits every block without
+		// ever landing next to the previous read.
+		{name: "random", offset: func(i int64) int64 { return ((i * 97) % blocks) * blockSize }},
+	} {
+		b.Run(bench.name, func(b *testing.B) {
+			api := &testBlob{id: bench.name, data: data}
+			reader, err := OpenWithOptions(context.Background(), api, newMemoryCache(16), OpenOptions{
+				BlockSize:      blockSize,
+				PrefetchBlocks: 4,
+			})
+			if err != nil {
+				b.Fatal(err)
+			}
+			buf := make([]byte, blockSize)
+			for i := 0; b.Loop(); i++ {
+				if _, err := reader.ReadAt(buf, bench.offset(int64(i))); err != nil {
+					b.Fatal(err)
+				}
+			}
+			b.ReportMetric(float64(api.requests.Load())/float64(b.N), "requests/op")
+		})
+	}
+}
+
 func TestMemoryCacheEvictsLeastRecentlyUsed(t *testing.T) {
 	cache := newMemoryCache(2)
 	if !cache.Add("a", []byte("a")) || !cache.Add("b", []byte("b")) {
@@ -461,6 +528,116 @@ func TestRangeGetContentMD5OptionBoundary(t *testing.T) {
 			t.Fatalf("count %d: option = false, want true", test.count)
 		}
 	}
+}
+
+// rangeRequestRecorder captures the request headers the Azure SDK sends, so
+// the assertions do not race with the still-running handler.
+type rangeRequestRecorder struct {
+	mu          sync.Mutex
+	rangeHeader string
+	md5Header   string
+}
+
+func (r *rangeRequestRecorder) record(request *http.Request) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	// The generated Azure SDK sends the range as x-ms-range.
+	r.rangeHeader = request.Header.Get("x-ms-range")
+	if r.rangeHeader == "" {
+		r.rangeHeader = request.Header.Get("Range")
+	}
+	r.md5Header = request.Header.Get("x-ms-range-get-content-md5")
+}
+
+func (r *rangeRequestRecorder) headers() (rangeHeader, md5Header string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.rangeHeader, r.md5Header
+}
+
+func TestSASBlobAPIReadRangeContentMD5(t *testing.T) {
+	data := []byte("azure export range payload")
+	sum := md5.Sum(data)
+	for _, test := range []struct {
+		name       string
+		contentMD5 string
+		options    []SASOption
+		wantMD5    string
+		wantErr    string
+	}{
+		{
+			name:       "matching checksum",
+			contentMD5: base64.StdEncoding.EncodeToString(sum[:]),
+			wantMD5:    "true",
+		},
+		{
+			name:       "mismatched checksum",
+			contentMD5: base64.StdEncoding.EncodeToString(md5Sum([]byte("other payload"))),
+			wantMD5:    "true",
+			wantErr:    "Content-MD5 mismatch",
+		},
+		{
+			name:    "missing checksum fails closed",
+			wantMD5: "true",
+			wantErr: "did not include Content-MD5",
+		},
+		{
+			name:    "missing checksum accepted without validation",
+			options: []SASOption{WithoutRangeChecksum()},
+			wantMD5: "",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			recorder := &rangeRequestRecorder{}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+				recorder.record(request)
+				if test.contentMD5 != "" {
+					w.Header().Set("Content-MD5", test.contentMD5)
+				}
+				w.Header().Set("Content-Range", fmt.Sprintf("bytes 0-%d/%d", len(data)-1, len(data)))
+				w.WriteHeader(http.StatusPartialContent)
+				_, _ = w.Write(data)
+			}))
+			defer server.Close()
+
+			options := append([]SASOption{
+				// Disable retries so a server-side failure cannot turn into a
+				// multi-second test.
+				WithRetryOptions(policy.RetryOptions{MaxRetries: -1}),
+			}, test.options...)
+			api := NewSASBlobAPI(server.URL+"/md-test/blob?sv=test&sig=test", options...)
+
+			value, err := api.ReadRange(context.Background(), 0, int64(len(data)))
+			if test.wantErr == "" {
+				if err != nil {
+					t.Fatalf("ReadRange: %v", err)
+				}
+				if !bytes.Equal(value, data) {
+					t.Fatalf("ReadRange = %q, want %q", value, data)
+				}
+			} else {
+				if err == nil {
+					t.Fatalf("ReadRange succeeded, want error containing %q", test.wantErr)
+				}
+				if !strings.Contains(err.Error(), test.wantErr) {
+					t.Fatalf("ReadRange error = %v, want it to contain %q", err, test.wantErr)
+				}
+			}
+
+			rangeHeader, md5Header := recorder.headers()
+			if want := fmt.Sprintf("bytes=0-%d", len(data)-1); rangeHeader != want {
+				t.Fatalf("Range header = %q, want %q", rangeHeader, want)
+			}
+			if md5Header != test.wantMD5 {
+				t.Fatalf("x-ms-range-get-content-md5 = %q, want %q", md5Header, test.wantMD5)
+			}
+		})
+	}
+}
+
+func md5Sum(value []byte) []byte {
+	sum := md5.Sum(value)
+	return sum[:]
 }
 
 func TestValidateRangeContentMD5(t *testing.T) {
