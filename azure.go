@@ -225,10 +225,7 @@ func (r *blobReader) ReadAt(p []byte, off int64) (int, error) {
 }
 
 func (r *blobReader) loadBlock(number int64) ([]byte, error) {
-	return r.loadBlockWithContext(r.ctx, number)
-}
-
-func (r *blobReader) loadBlockWithContext(ctx context.Context, number int64) ([]byte, error) {
+	ctx := r.ctx
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -307,9 +304,7 @@ func (r *blobReader) releaseBlock() {
 
 func (r *blobReader) prefetch(number int64) {
 	go func() {
-		ctx, cancel := context.WithCancel(r.ctx)
-		defer cancel()
-		_, _ = r.loadBlockWithContext(ctx, number)
+		_, _ = r.loadBlock(number)
 	}()
 }
 
@@ -449,6 +444,10 @@ func WithPageRangeWindow(size int64) SASOption {
 // error. Use this only when the endpoint is known not to support
 // x-ms-range-get-content-md5, because it removes detection of silently
 // corrupted range responses.
+//
+// Validation only covers ranges of 4 MiB or less, the limit Azure accepts for
+// x-ms-range-get-content-md5. An OpenOptions.BlockSize above that reads
+// without validation even when this option is not used.
 func WithoutRangeChecksum() SASOption {
 	return func(config *sasBlobOptions) { config.skipRangeChecksum = true }
 }
