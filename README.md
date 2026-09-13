@@ -71,9 +71,10 @@ sr, cleanup, err := snapshot.GrantAccessAndOpenWithOptions(ctx, cred, resourceID
 ```
 
 `Duration: 0` uses a 20-minute SAS. Both `GrantAccessAndOpen` and
-`GrantAccessAndOpenWithOptions` pre-revoke an existing active SAS and revoke
-the newly granted SAS during cleanup by default. Set
-`SkipPreRevokeActiveSAS` or `SkipRevokeOnCleanup` only to explicitly opt out.
+`GrantAccessAndOpenWithOptions` pre-revoke an existing active SAS, revoke the
+newly granted SAS during cleanup, and validate range checksums by default. Set
+`SkipPreRevokeActiveSAS`, `SkipRevokeOnCleanup` or `SkipRangeChecksum` only to
+explicitly opt out.
 
 When a cache is shared between readers, the cache key includes the blob
 identifier. Implementations that do not expose `BlobIdentifier` receive a
@@ -83,7 +84,24 @@ desired.
 
 `OpenWithOptions` can set `MaxConcurrentBlocks` to bound in-flight range
 requests (the default is unlimited) and `PrefetchBlocks` to enable
-cancellable read-ahead.
+cancellable read-ahead. Read-ahead only follows a read that continues where
+the previous one ended, so random access issues no extra requests.
+
+### Range checksums
+
+`NewSASBlobAPI` asks for `x-ms-range-get-content-md5` and validates the
+returned `Content-MD5` on every range of 4 MiB or less, which covers the
+default 1 MiB block size. Validation fails closed: a range response without
+`Content-MD5` is an error rather than unverified data. Larger ranges are not
+eligible for the header and are read without validation.
+
+Pass `WithoutRangeChecksum` when the endpoint does not support the header.
+The equivalents are `snapshot.Options.SkipRangeChecksum` and the
+`-skip-checksum` flag of the verification CLI.
+
+```go
+api := azurediskfile.NewSASBlobAPI(sasURL, azurediskfile.WithoutRangeChecksum())
+```
 
 The verification CLI accepts its SAS URL from `AZURE_SAS_URL` (preferred, so
 the URL is not placed in the command line), while the legacy `-url` flag and

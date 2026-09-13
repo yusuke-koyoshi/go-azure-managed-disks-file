@@ -16,6 +16,7 @@ func main() {
 	urlValue := flag.String("url", "", "snapshot export SAS URL (prefer AZURE_SAS_URL)")
 	offset := flag.Int64("offset", 0, "byte offset")
 	length := flag.Int("length", 512, "number of bytes")
+	skipChecksum := flag.Bool("skip-checksum", false, "skip per-range MD5 validation")
 	flag.Parse()
 	if *urlValue == "" {
 		*urlValue = os.Getenv("AZURE_SAS_URL")
@@ -24,7 +25,7 @@ func main() {
 		*urlValue = flag.Arg(0)
 	}
 	if *urlValue == "" {
-		fmt.Fprintln(os.Stderr, "usage: AZURE_SAS_URL='...' azure-disk-hexdump [-offset N] [-length N]")
+		fmt.Fprintln(os.Stderr, "usage: AZURE_SAS_URL='...' azure-disk-hexdump [-offset N] [-length N] [-skip-checksum]")
 		fmt.Fprintln(os.Stderr, "       azure-disk-hexdump -url SAS_URL [-offset N] [-length N] (legacy)")
 		os.Exit(2)
 	}
@@ -32,7 +33,11 @@ func main() {
 		log.Fatal("offset and length must be non-negative")
 	}
 
-	api := azurediskfile.NewSASBlobAPI(*urlValue)
+	var options []azurediskfile.SASOption
+	if *skipChecksum {
+		options = append(options, azurediskfile.WithoutRangeChecksum())
+	}
+	api := azurediskfile.NewSASBlobAPI(*urlValue, options...)
 	reader, err := azurediskfile.Open(context.Background(), api, nil)
 	if err != nil {
 		log.Fatal(err)

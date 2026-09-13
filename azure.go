@@ -271,7 +271,7 @@ func (r *blobReader) loadBlockWithContext(ctx context.Context, number int64) ([]
 		}
 		value, err := r.api.ReadRange(ctx, start, count)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("azurediskfile: range %d-%d: %w", start, start+count-1, err)
 		}
 		if int64(len(value)) != count {
 			return nil, fmt.Errorf("azurediskfile: range %d-%d returned %d bytes, want %d", start, start+count-1, len(value), count)
@@ -408,22 +408,24 @@ func (c *memoryCache) Get(key string) ([]byte, bool) {
 }
 
 type sasBlobAPI struct {
-	blob       *blob.Client
-	pageBlob   *pageblob.Client
-	identifier string
-	initErr    error
-	windowSize int64
-	sizeMu     sync.Mutex
-	sizeValue  int64
-	sizeReady  bool
+	blob              *blob.Client
+	pageBlob          *pageblob.Client
+	identifier        string
+	initErr           error
+	windowSize        int64
+	skipRangeChecksum bool
+	sizeMu            sync.Mutex
+	sizeValue         int64
+	sizeReady         bool
 }
 
 // SASOption configures the Azure SDK client used by NewSASBlobAPI.
 type SASOption func(*sasBlobOptions)
 
 type sasBlobOptions struct {
-	retry      policy.RetryOptions
-	windowSize int64
+	retry             policy.RetryOptions
+	windowSize        int64
+	skipRangeChecksum bool
 }
 
 // WithRetryOptions replaces the Azure SDK retry policy. Azure's default policy
@@ -442,6 +444,15 @@ func WithPageRangeWindow(size int64) SASOption {
 	}
 }
 
+// WithoutRangeChecksum disables per-range MD5 validation. Validation is on by
+// default and fails closed, so a range response without Content-MD5 is an
+// error. Use this only when the endpoint is known not to support
+// x-ms-range-get-content-md5, because it removes detection of silently
+// corrupted range responses.
+func WithoutRangeChecksum() SASOption {
+	return func(config *sasBlobOptions) { config.skipRangeChecksum = true }
+}
+
 // NewSASBlobAPI creates a BlobAPI backed by an export SAS URL.
 func NewSASBlobAPI(sasURL string, options ...SASOption) BlobAPI {
 	config := sasBlobOptions{windowSize: defaultPageRangeWindow}
@@ -455,7 +466,12 @@ func NewSASBlobAPI(sasURL string, options ...SASOption) BlobAPI {
 		if err == nil {
 			err = errors.New("invalid SAS URL")
 		}
-		return &sasBlobAPI{initErr: err, identifier: sasURL, windowSize: config.windowSize}
+		return &sasBlobAPI{
+			initErr:           err,
+			identifier:        sasURL,
+			windowSize:        config.windowSize,
+			skipRangeChecksum: config.skipRangeChecksum,
+		}
 	}
 	blobOptions := &blob.ClientOptions{}
 	blobOptions.Retry = config.retry
@@ -469,11 +485,12 @@ func NewSASBlobAPI(sasURL string, options ...SASOption) BlobAPI {
 		err = pageErr
 	}
 	return &sasBlobAPI{
-		blob:       blobClient,
-		pageBlob:   pageClient,
-		identifier: parsed.Scheme + "://" + parsed.Host + parsed.Path,
-		initErr:    err,
-		windowSize: config.windowSize,
+		blob:              blobClient,
+		pageBlob:          pageClient,
+		identifier:        parsed.Scheme + "://" + parsed.Host + parsed.Path,
+		initErr:           err,
+		windowSize:        config.windowSize,
+		skipRangeChecksum: config.skipRangeChecksum,
 	}
 }
 
@@ -504,7 +521,10 @@ func (a *sasBlobAPI) ReadRange(ctx context.Context, off, count int64) ([]byte, e
 	if a.initErr != nil {
 		return nil, a.initErr
 	}
-	rangeGetContentMD5 := rangeGetContentMD5Option(count)
+	var rangeGetContentMD5 *bool
+	if !a.skipRangeChecksum {
+		rangeGetContentMD5 = rangeGetContentMD5Option(count)
+	}
 	response, err := a.blob.DownloadStream(ctx, &blob.DownloadStreamOptions{
 		Range:              azblob.HTTPRange{Offset: off, Count: count},
 		RangeGetContentMD5: rangeGetContentMD5,
@@ -540,7 +560,7 @@ func validateRangeContentMD5(value, expected []byte) error {
 	}
 	actual := md5.Sum(value)
 	if !bytes.Equal(actual[:], expected) {
-		return fmt.Errorf("azurediskfile: range Content-MD5 mismatch")
+		return errors.New("azurediskfile: range Content-MD5 mismatch")
 	}
 	return nil
 }
