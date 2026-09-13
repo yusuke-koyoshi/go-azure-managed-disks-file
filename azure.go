@@ -3,7 +3,10 @@
 package azurediskfile
 
 import (
+	"bytes"
+	"container/list"
 	"context"
+	"crypto/md5"
 	"errors"
 	"fmt"
 	"io"
@@ -12,6 +15,7 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
+	"sync/atomic"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob"
@@ -24,6 +28,7 @@ const (
 	// DefaultBlockSize is the default size of a cached HTTP range.
 	DefaultBlockSize       int64 = 1 << 20
 	defaultPageRangeWindow       = int64(4 << 30)
+	maxRangeGetContentMD5        = int64(4 << 20)
 )
 
 // Range describes a byte range on a blob. Start and End are both inclusive.
@@ -56,14 +61,21 @@ type OpenOptions struct {
 	// DefaultBlockSize.
 	BlockSize int64
 	// PrefetchBlocks asynchronously fetches this many blocks after each read.
-	// It is disabled by default. Prefetching is derived solely from the read
-	// arguments and does not keep mutable cursor state.
+	// It is disabled by default. Prefetching only follows reads that are
+	// sequential with the previous completed read.
 	PrefetchBlocks int
+	// MaxConcurrentBlocks limits the number of blocks being fetched at once.
+	// A non-positive value leaves block fetching unlimited.
+	MaxConcurrentBlocks int
 }
 
 // Open opens api as a concurrent-safe *io.SectionReader. The returned reader's
 // ReadAt method may be called concurrently. Blocks are fetched in parallel,
 // cached by blob identity and block number, and coalesced with singleflight.
+// PageRanges is an optional optimization: errors and empty results disable
+// sparse-range skipping without preventing the reader from opening. If api
+// does not provide BlobIdentifier, the reader gets a unique identity and its
+// blocks are not shared with other readers through a shared cache.
 func Open(ctx context.Context, api BlobAPI, cache Cache[string, []byte]) (*io.SectionReader, error) {
 	return OpenWithOptions(ctx, api, cache, OpenOptions{})
 }
@@ -89,13 +101,16 @@ func OpenWithOptions(ctx context.Context, api BlobAPI, cache Cache[string, []byt
 	if options.PrefetchBlocks < 0 {
 		options.PrefetchBlocks = 0
 	}
-	ranges, err := api.PageRanges(ctx)
-	if err != nil {
-		return nil, err
+	ranges, rangesErr := api.PageRanges(ctx)
+	if rangesErr != nil {
+		ranges = nil
 	}
-	id := fmt.Sprintf("%T:%p", api, api)
+	ranges = normalizeRanges(ranges)
+	id := fmt.Sprintf("%T:reader-%d", api, nextReaderID.Add(1))
 	if identified, ok := api.(blobIdentifier); ok {
-		id = identified.BlobIdentifier()
+		if identifiedID := identified.BlobIdentifier(); identifiedID != "" {
+			id = identifiedID
+		}
 	}
 	r := &blobReader{
 		ctx:            ctx,
@@ -105,14 +120,20 @@ func OpenWithOptions(ctx context.Context, api BlobAPI, cache Cache[string, []byt
 		sizeValue:      size,
 		blockSize:      options.BlockSize,
 		prefetchBlocks: options.PrefetchBlocks,
-		ranges:         normalizeRanges(ranges),
-		rangesKnown:    ranges != nil,
+		maxConcurrent:  options.MaxConcurrentBlocks,
+		ranges:         ranges,
+		rangesKnown:    len(ranges) > 0,
 	}
 	if r.cache == nil {
-		r.cache = &memoryCache{values: make(map[string][]byte), maxEntries: 256}
+		r.cache = newMemoryCache(256)
+	}
+	if r.maxConcurrent > 0 {
+		r.blockSem = make(chan struct{}, r.maxConcurrent)
 	}
 	return io.NewSectionReader(r, 0, size), nil
 }
+
+var nextReaderID atomic.Uint64
 
 type blobReader struct {
 	ctx            context.Context
@@ -122,9 +143,14 @@ type blobReader struct {
 	sizeValue      int64
 	blockSize      int64
 	prefetchBlocks int
+	maxConcurrent  int
+	blockSem       chan struct{}
 	ranges         []Range
 	rangesKnown    bool
 	group          singleflight.Group
+	readMu         sync.Mutex
+	lastReadEnd    int64
+	hasRead        bool
 }
 
 func (r *blobReader) ReadAt(p []byte, off int64) (int, error) {
@@ -133,6 +159,9 @@ func (r *blobReader) ReadAt(p []byte, off int64) (int, error) {
 	}
 	if len(p) == 0 {
 		return 0, nil
+	}
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
 	}
 
 	first := off / r.blockSize
@@ -177,22 +206,32 @@ func (r *blobReader) ReadAt(p []byte, off int64) (int, error) {
 		return n, io.EOF
 	}
 
-	if r.prefetchBlocks > 0 {
+	r.readMu.Lock()
+	sequential := !r.hasRead || off == r.lastReadEnd
+	r.lastReadEnd = off + int64(len(p))
+	r.hasRead = true
+	r.readMu.Unlock()
+	if sequential && r.prefetchBlocks > 0 {
 		next := last + 1
 		for i := 0; i < r.prefetchBlocks; i++ {
 			number := next + int64(i)
 			if number*r.blockSize >= r.sizeValue {
 				break
 			}
-			go func(number int64) {
-				_, _ = r.loadBlock(number)
-			}(number)
+			r.prefetch(number)
 		}
 	}
 	return n, nil
 }
 
 func (r *blobReader) loadBlock(number int64) ([]byte, error) {
+	return r.loadBlockWithContext(r.ctx, number)
+}
+
+func (r *blobReader) loadBlockWithContext(ctx context.Context, number int64) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	key := fmt.Sprintf("%s:%d:%d", r.id, r.blockSize, number)
 	if r.cache != nil {
 		if value, ok := r.cache.Get(key); ok {
@@ -200,10 +239,20 @@ func (r *blobReader) loadBlock(number int64) ([]byte, error) {
 		}
 	}
 	value, err, _ := r.group.Do(key, func() (any, error) {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if r.cache != nil {
 			if value, ok := r.cache.Get(key); ok {
 				return value, nil
 			}
+		}
+		if err := r.acquireBlock(ctx); err != nil {
+			return nil, err
+		}
+		defer r.releaseBlock()
+		if err := ctx.Err(); err != nil {
+			return nil, err
 		}
 		start := number * r.blockSize
 		if r.isUnallocated(start, start+r.blockSize-1) {
@@ -220,7 +269,7 @@ func (r *blobReader) loadBlock(number int64) ([]byte, error) {
 		if count <= 0 {
 			return []byte{}, nil
 		}
-		value, err := r.api.ReadRange(r.ctx, start, count)
+		value, err := r.api.ReadRange(ctx, start, count)
 		if err != nil {
 			return nil, err
 		}
@@ -236,6 +285,32 @@ func (r *blobReader) loadBlock(number int64) ([]byte, error) {
 		return nil, err
 	}
 	return value.([]byte), nil
+}
+
+func (r *blobReader) acquireBlock(ctx context.Context) error {
+	if r.blockSem == nil {
+		return nil
+	}
+	select {
+	case r.blockSem <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (r *blobReader) releaseBlock() {
+	if r.blockSem != nil {
+		<-r.blockSem
+	}
+}
+
+func (r *blobReader) prefetch(number int64) {
+	go func() {
+		ctx, cancel := context.WithCancel(r.ctx)
+		defer cancel()
+		_, _ = r.loadBlockWithContext(ctx, number)
+	}()
 }
 
 func (r *blobReader) size() int64 { return r.sizeValue }
@@ -281,28 +356,54 @@ func normalizeRanges(ranges []Range) []Range {
 }
 
 type memoryCache struct {
-	mu         sync.RWMutex
+	mu         sync.Mutex
 	values     map[string][]byte
 	maxEntries int
+	order      *list.List
+	positions  map[string]*list.Element
+}
+
+type memoryCacheEntry struct {
+	key string
+}
+
+func newMemoryCache(maxEntries int) *memoryCache {
+	return &memoryCache{
+		values:     make(map[string][]byte),
+		maxEntries: maxEntries,
+		order:      list.New(),
+		positions:  make(map[string]*list.Element),
+	}
 }
 
 func (c *memoryCache) Add(key string, value []byte) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if _, exists := c.values[key]; exists {
+		c.order.MoveToFront(c.positions[key])
 		return false
 	}
 	if c.maxEntries > 0 && len(c.values) >= c.maxEntries {
-		return false
+		oldest := c.order.Back()
+		if oldest != nil {
+			entry := oldest.Value.(memoryCacheEntry)
+			delete(c.values, entry.key)
+			delete(c.positions, entry.key)
+			c.order.Remove(oldest)
+		}
 	}
 	c.values[key] = value
+	c.positions[key] = c.order.PushFront(memoryCacheEntry{key: key})
 	return true
 }
 
 func (c *memoryCache) Get(key string) ([]byte, bool) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	value, ok := c.values[key]
+	if ok {
+		c.order.MoveToFront(c.positions[key])
+	}
 	return value, ok
 }
 
@@ -403,15 +504,45 @@ func (a *sasBlobAPI) ReadRange(ctx context.Context, off, count int64) ([]byte, e
 	if a.initErr != nil {
 		return nil, a.initErr
 	}
+	rangeGetContentMD5 := rangeGetContentMD5Option(count)
 	response, err := a.blob.DownloadStream(ctx, &blob.DownloadStreamOptions{
-		Range: azblob.HTTPRange{Offset: off, Count: count},
+		Range:              azblob.HTTPRange{Offset: off, Count: count},
+		RangeGetContentMD5: rangeGetContentMD5,
 	})
 	if err != nil {
 		return nil, err
 	}
 	reader := response.NewRetryReader(ctx, nil)
 	defer reader.Close()
-	return io.ReadAll(reader)
+	value, err := io.ReadAll(reader)
+	if err != nil {
+		return nil, err
+	}
+	if rangeGetContentMD5 != nil {
+		if err := validateRangeContentMD5(value, response.ContentMD5); err != nil {
+			return nil, err
+		}
+	}
+	return value, nil
+}
+
+func rangeGetContentMD5Option(count int64) *bool {
+	if count <= 0 || count > maxRangeGetContentMD5 {
+		return nil
+	}
+	value := true
+	return &value
+}
+
+func validateRangeContentMD5(value, expected []byte) error {
+	if len(expected) == 0 {
+		return errors.New("azurediskfile: range response did not include Content-MD5")
+	}
+	actual := md5.Sum(value)
+	if !bytes.Equal(actual[:], expected) {
+		return fmt.Errorf("azurediskfile: range Content-MD5 mismatch")
+	}
+	return nil
 }
 
 func (a *sasBlobAPI) PageRanges(ctx context.Context) ([]Range, error) {

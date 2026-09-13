@@ -3,6 +3,8 @@ package azurediskfile
 import (
 	"bytes"
 	"context"
+	"crypto/md5"
+	"errors"
 	"io"
 	"sync"
 	"sync/atomic"
@@ -11,21 +13,32 @@ import (
 )
 
 type testBlob struct {
-	id       string
-	data     []byte
-	ranges   []Range
-	delay    chan struct{}
-	started  chan struct{}
-	requests atomic.Int64
+	id        string
+	data      []byte
+	ranges    []Range
+	delay     chan struct{}
+	started   chan struct{}
+	requests  atomic.Int64
+	active    atomic.Int64
+	maxActive atomic.Int64
+	rangesErr error
 }
 
 func (b *testBlob) BlobIdentifier() string { return b.id }
 func (b *testBlob) Size(context.Context) (int64, error) {
 	return int64(len(b.data)), nil
 }
-func (b *testBlob) PageRanges(context.Context) ([]Range, error) { return b.ranges, nil }
+func (b *testBlob) PageRanges(context.Context) ([]Range, error) { return b.ranges, b.rangesErr }
 func (b *testBlob) ReadRange(ctx context.Context, off, count int64) ([]byte, error) {
 	b.requests.Add(1)
+	active := b.active.Add(1)
+	defer b.active.Add(-1)
+	for {
+		maxActive := b.maxActive.Load()
+		if active <= maxActive || b.maxActive.CompareAndSwap(maxActive, active) {
+			break
+		}
+	}
 	if b.started != nil {
 		select {
 		case b.started <- struct{}{}:
@@ -43,6 +56,42 @@ func (b *testBlob) ReadRange(ctx context.Context, off, count int64) ([]byte, err
 		return nil, io.ErrUnexpectedEOF
 	}
 	return append([]byte(nil), b.data[off:off+count]...), nil
+}
+
+type noIdentityBlob struct {
+	blob *testBlob
+}
+
+func (b *noIdentityBlob) Size(ctx context.Context) (int64, error) {
+	return b.blob.Size(ctx)
+}
+func (b *noIdentityBlob) PageRanges(ctx context.Context) ([]Range, error) {
+	return b.blob.PageRanges(ctx)
+}
+func (b *noIdentityBlob) ReadRange(ctx context.Context, off, count int64) ([]byte, error) {
+	return b.blob.ReadRange(ctx, off, count)
+}
+
+type cancelAfterFirstRangeBlob struct {
+	cancel context.CancelFunc
+	data   []byte
+	once   sync.Once
+}
+
+func (b *cancelAfterFirstRangeBlob) BlobIdentifier() string { return "partial-cancel" }
+func (b *cancelAfterFirstRangeBlob) Size(context.Context) (int64, error) {
+	return int64(len(b.data)), nil
+}
+func (b *cancelAfterFirstRangeBlob) PageRanges(context.Context) ([]Range, error) {
+	return nil, nil
+}
+func (b *cancelAfterFirstRangeBlob) ReadRange(ctx context.Context, off, count int64) ([]byte, error) {
+	if off == 0 {
+		b.once.Do(b.cancel)
+		return append([]byte(nil), b.data[off:off+count]...), nil
+	}
+	<-ctx.Done()
+	return nil, ctx.Err()
 }
 
 type testCache struct {
@@ -212,5 +261,218 @@ func TestOpenSkipsUnallocatedBlocks(t *testing.T) {
 	}
 	if string(buf) != "WXYZ" {
 		t.Fatalf("allocated block = %q", buf)
+	}
+}
+
+func TestOpenEmptyPageRangesDoesNotZeroReads(t *testing.T) {
+	api := &testBlob{id: "empty-ranges", data: []byte("data"), ranges: []Range{}}
+	reader, err := OpenWithOptions(context.Background(), api, nil, OpenOptions{BlockSize: 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 4)
+	if _, err := reader.ReadAt(buf, 0); err != nil {
+		t.Fatal(err)
+	}
+	if string(buf) != "data" {
+		t.Fatalf("got %q, want data", buf)
+	}
+	if api.requests.Load() != 1 {
+		t.Fatalf("requests = %d, want 1", api.requests.Load())
+	}
+}
+
+func TestOpenContinuesWhenPageRangesFails(t *testing.T) {
+	api := &testBlob{
+		id:        "ranges-error",
+		data:      []byte("data"),
+		rangesErr: errors.New("page ranges unavailable"),
+	}
+	reader, err := OpenWithOptions(context.Background(), api, nil, OpenOptions{BlockSize: 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 4)
+	if _, err := reader.ReadAt(buf, 0); err != nil {
+		t.Fatal(err)
+	}
+	if string(buf) != "data" {
+		t.Fatalf("got %q, want data", buf)
+	}
+}
+
+func TestOpenFallbackBlobIdentityIsUniquePerReader(t *testing.T) {
+	cache := &testCache{values: make(map[string][]byte)}
+	underlying := &testBlob{data: []byte("data")}
+	api := &noIdentityBlob{blob: underlying}
+	reader1, err := OpenWithOptions(context.Background(), api, cache, OpenOptions{BlockSize: 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reader2, err := OpenWithOptions(context.Background(), api, cache, OpenOptions{BlockSize: 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, reader := range []*io.SectionReader{reader1, reader2} {
+		buf := make([]byte, 4)
+		if _, err := reader.ReadAt(buf, 0); err != nil {
+			t.Fatal(err)
+		}
+		if string(buf) != "data" {
+			t.Fatalf("got %q", buf)
+		}
+	}
+	if got := underlying.requests.Load(); got != 2 {
+		t.Fatalf("ReadRange calls = %d, want 2", got)
+	}
+}
+
+func TestOpenReadHonorsCancellationAfterOpen(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	api := &testBlob{id: "cancelled", data: []byte("data")}
+	reader, err := OpenWithOptions(ctx, api, nil, OpenOptions{BlockSize: 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+	buf := make([]byte, 4)
+	if _, err := reader.ReadAt(buf, 0); !errors.Is(err, context.Canceled) {
+		t.Fatalf("ReadAt error = %v, want context.Canceled", err)
+	}
+	if api.requests.Load() != 0 {
+		t.Fatalf("ReadRange calls = %d, want 0", api.requests.Load())
+	}
+}
+
+func TestReadAtReturnsPartialBytesOnCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	api := &cancelAfterFirstRangeBlob{
+		cancel: cancel,
+		data:   []byte("abcdefgh"),
+	}
+	reader, err := OpenWithOptions(ctx, api, nil, OpenOptions{BlockSize: 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	n, err := reader.ReadAt(make([]byte, 8), 0)
+	if n != 4 {
+		t.Fatalf("ReadAt n = %d, want 4", n)
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("ReadAt error = %v, want context.Canceled", err)
+	}
+}
+
+func TestOpenMaxConcurrentBlocks(t *testing.T) {
+	api := &testBlob{
+		id:      "bounded",
+		data:    bytes.Repeat([]byte("x"), 32),
+		delay:   make(chan struct{}),
+		started: make(chan struct{}, 8),
+	}
+	reader, err := OpenWithOptions(context.Background(), api, nil, OpenOptions{
+		BlockSize:           4,
+		MaxConcurrentBlocks: 2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() {
+		_, _ = reader.ReadAt(make([]byte, len(api.data)), 0)
+		close(done)
+	}()
+	for range 2 {
+		select {
+		case <-api.started:
+		case <-time.After(time.Second):
+			t.Fatal("did not start initial block requests")
+		}
+	}
+	select {
+	case <-api.started:
+		t.Fatal("started more than MaxConcurrentBlocks requests")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(api.delay)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("bounded read did not finish")
+	}
+	if got := api.maxActive.Load(); got > 2 {
+		t.Fatalf("max active requests = %d, want at most 2", got)
+	}
+}
+
+func TestMemoryCacheEvictsLeastRecentlyUsed(t *testing.T) {
+	cache := newMemoryCache(2)
+	if !cache.Add("a", []byte("a")) || !cache.Add("b", []byte("b")) {
+		t.Fatal("initial cache adds failed")
+	}
+	if _, ok := cache.Get("a"); !ok {
+		t.Fatal("cache did not return a")
+	}
+	if !cache.Add("c", []byte("c")) {
+		t.Fatal("cache add c failed")
+	}
+	if _, ok := cache.Get("b"); ok {
+		t.Fatal("least recently used entry b was not evicted")
+	}
+	if _, ok := cache.Get("a"); !ok {
+		t.Fatal("recently used entry a was evicted")
+	}
+}
+
+func TestMemoryCacheDuplicateAddRefreshesLRU(t *testing.T) {
+	cache := newMemoryCache(2)
+	cache.Add("a", []byte("a"))
+	cache.Add("b", []byte("b"))
+	if cache.Add("a", []byte("new a")) {
+		t.Fatal("duplicate add reported an insertion")
+	}
+	cache.Add("c", []byte("c"))
+	if _, ok := cache.Get("b"); ok {
+		t.Fatal("duplicate add did not refresh a")
+	}
+	if value, ok := cache.Get("a"); !ok || string(value) != "a" {
+		t.Fatalf("a = %q, %v", value, ok)
+	}
+}
+
+func TestRangeGetContentMD5OptionBoundary(t *testing.T) {
+	// The Azure SDK owns the generated HTTP transport and response type, so
+	// the boundary is tested through the request-option helper instead of a
+	// live Azure response.
+	for _, test := range []struct {
+		count int64
+		want  bool
+	}{
+		{count: 0, want: false},
+		{count: maxRangeGetContentMD5 - 1, want: true},
+		{count: maxRangeGetContentMD5, want: true},
+		{count: maxRangeGetContentMD5 + 1, want: false},
+	} {
+		option := rangeGetContentMD5Option(test.count)
+		if (option != nil) != test.want {
+			t.Fatalf("count %d: option present = %v, want %v", test.count, option != nil, test.want)
+		}
+		if option != nil && !*option {
+			t.Fatalf("count %d: option = false, want true", test.count)
+		}
+	}
+}
+
+func TestValidateRangeContentMD5(t *testing.T) {
+	data := []byte("range data")
+	sum := md5.Sum(data)
+	if err := validateRangeContentMD5(data, sum[:]); err != nil {
+		t.Fatalf("validateRangeContentMD5: %v", err)
+	}
+	if err := validateRangeContentMD5(data, []byte("bad")); err == nil {
+		t.Fatal("validateRangeContentMD5 accepted a mismatched checksum")
+	}
+	if err := validateRangeContentMD5(data, nil); err == nil {
+		t.Fatal("validateRangeContentMD5 accepted a missing checksum")
 	}
 }
