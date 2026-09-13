@@ -195,6 +195,20 @@ func TestGrantAccessAndOpen(t *testing.T) {
 		}
 	})
 
+	// The grant is a long-running operation, so an error can arrive after ARM
+	// has already issued the SAS. Revocation must not depend on the grant call
+	// reporting success.
+	t.Run("revokes when the grant fails", func(t *testing.T) {
+		client := &fakeSnapshotClient{grantErr: errors.New("grant failed")}
+		_, _, err := grantAccessAndOpen(t.Context(), client, durationSeconds, nil, Options{})
+		if err == nil {
+			t.Fatal("grantAccessAndOpen succeeded with a failing grant")
+		}
+		if got := client.revokes(); got != 1 {
+			t.Errorf("revocations = %d, want 1", got)
+		}
+	})
+
 	t.Run("revokes when the reader cannot be opened", func(t *testing.T) {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			http.Error(w, "no such blob", http.StatusNotFound)

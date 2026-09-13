@@ -34,7 +34,8 @@ type Options struct {
 	SkipRevokeOnCleanup bool
 	// SkipRangeChecksum disables per-range MD5 validation when true. Validation
 	// fails closed, so this is the fallback for export endpoints that do not
-	// support x-ms-range-get-content-md5.
+	// support x-ms-range-get-content-md5. Validation only covers ranges of
+	// 4 MiB or less, which the default block size satisfies.
 	SkipRangeChecksum bool
 }
 
@@ -138,6 +139,11 @@ func grantAccessAndOpen(
 
 	sas, err := client.GrantReadAccess(ctx, durationSeconds)
 	if err != nil {
+		// The grant is a long-running operation: it can fail while polling
+		// after ARM has already issued the SAS. Revoking is harmless when
+		// nothing was granted, so fail closed rather than leaving a SAS
+		// active for the whole duration with no cleanup handle returned.
+		revokeDetached(client)
 		return nil, nil, err
 	}
 	if sas == "" {
