@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"math"
 	"sync"
 	"time"
 
@@ -15,7 +16,22 @@ import (
 	azurediskfile "github.com/yusuke-koyoshi/go-azure-managed-disks-file"
 )
 
-const accessDurationSeconds int32 = 20 * 60
+const defaultAccessDuration = 20 * time.Minute
+
+// Options configures snapshot SAS issuance and cleanup.
+//
+// A zero Duration uses the default 20-minute grant duration. By default,
+// GrantAccessAndOpenWithOptions revokes an existing active SAS before granting
+// access and revokes the new SAS during cleanup. Set the Skip fields only when
+// deliberately opting out of those safety behaviors.
+type Options struct {
+	// Duration is the SAS lifetime. Zero uses the 20-minute default.
+	Duration time.Duration
+	// SkipPreRevokeActiveSAS skips revoking an existing active SAS when true.
+	SkipPreRevokeActiveSAS bool
+	// SkipRevokeOnCleanup skips revoking the granted SAS during cleanup when true.
+	SkipRevokeOnCleanup bool
+}
 
 // GrantAccessAndOpen revokes a previous active SAS, grants a new read SAS for
 // 20 minutes, and opens the snapshot through the root package. The cleanup
@@ -30,6 +46,18 @@ func GrantAccessAndOpen(
 	resourceID string,
 	cache azurediskfile.Cache[string, []byte],
 ) (*io.SectionReader, func(), error) {
+	return GrantAccessAndOpenWithOptions(ctx, cred, resourceID, cache, Options{})
+}
+
+// GrantAccessAndOpenWithOptions is GrantAccessAndOpen with configurable SAS
+// duration and revocation behavior.
+func GrantAccessAndOpenWithOptions(
+	ctx context.Context,
+	cred azcore.TokenCredential,
+	resourceID string,
+	cache azurediskfile.Cache[string, []byte],
+	options Options,
+) (*io.SectionReader, func(), error) {
 	if cred == nil {
 		return nil, nil, errors.New("snapshot: nil TokenCredential")
 	}
@@ -43,6 +71,17 @@ func GrantAccessAndOpen(
 	if id.SubscriptionID == "" || id.ResourceGroupName == "" || id.Name == "" {
 		return nil, nil, errors.New("snapshot: resource ID must identify a snapshot")
 	}
+	duration := options.Duration
+	if duration == 0 {
+		duration = defaultAccessDuration
+	}
+	if duration < 0 {
+		return nil, nil, errors.New("snapshot: Duration must not be negative")
+	}
+	durationSeconds := duration / time.Second
+	if durationSeconds <= 0 || durationSeconds > math.MaxInt32 {
+		return nil, nil, errors.New("snapshot: Duration must be between one second and int32 maximum")
+	}
 	client, err := armcompute.NewSnapshotsClient(id.SubscriptionID, cred, nil)
 	if err != nil {
 		return nil, nil, err
@@ -52,7 +91,7 @@ func GrantAccessAndOpen(
 	if err != nil {
 		return nil, nil, err
 	}
-	if state.Properties != nil && state.Properties.DiskState != nil &&
+	if !options.SkipPreRevokeActiveSAS && state.Properties != nil && state.Properties.DiskState != nil &&
 		*state.Properties.DiskState == armcompute.DiskStateActiveSAS {
 		if err := revoke(ctx, client, id.ResourceGroupName, id.Name); err != nil {
 			return nil, nil, err
@@ -60,8 +99,8 @@ func GrantAccessAndOpen(
 	}
 
 	grantPoller, err := client.BeginGrantAccess(ctx, id.ResourceGroupName, id.Name, armcompute.GrantAccessData{
-		Access:                   toAccessLevel(armcompute.AccessLevelRead),
-		DurationInSeconds:        new(accessDurationSeconds),
+		Access:                   new(armcompute.AccessLevelRead),
+		DurationInSeconds:        new(int32(durationSeconds)),
 		GetSecureVMGuestStateSAS: new(false),
 	}, nil)
 	if err != nil {
@@ -88,6 +127,9 @@ func GrantAccessAndOpen(
 	}
 	var once sync.Once
 	cleanup := func() {
+		if options.SkipRevokeOnCleanup {
+			return
+		}
 		once.Do(func() {
 			cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
@@ -105,12 +147,3 @@ func revoke(ctx context.Context, client *armcompute.SnapshotsClient, resourceGro
 	_, err = poller.PollUntilDone(ctx, nil)
 	return err
 }
-
-//go:fix inline
-func toAccessLevel(value armcompute.AccessLevel) *armcompute.AccessLevel { return new(value) }
-
-//go:fix inline
-func toInt32(value int32) *int32 { return new(value) }
-
-//go:fix inline
-func toBool(value bool) *bool { return new(value) }
