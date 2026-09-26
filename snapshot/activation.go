@@ -19,9 +19,8 @@ const (
 // advancing.
 var newSASBlobAPI = azurediskfile.NewSASBlobAPI
 
-// activatingBlobAPI retries 403 until activeBy. A new SAS propagates to the
-// storage front ends one by one over up to 30 seconds, so any request in that
-// window can be rejected even after an earlier one succeeded.
+// activatingBlobAPI retries 403 until activeBy, while the new SAS reaches the
+// storage front ends one at a time.
 type activatingBlobAPI struct {
 	api      azurediskfile.BlobAPI
 	activeBy time.Time

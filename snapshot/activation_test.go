@@ -184,7 +184,10 @@ func TestGrantAccessAndOpenWaitsForActivation(t *testing.T) {
 
 	t.Run("opens and reads through a propagating SAS", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
-			data := []byte("allocated.......unallocated.....")
+			// Two blocks, so the unallocated second block is not served from
+			// the cached first one.
+			data := make([]byte, 2*azurediskfile.DefaultBlockSize)
+			copy(data, "allocated.......")
 			blob := newMemoryBlob(data, []azurediskfile.Range{{Start: 0, End: 15}},
 				map[string]int{"PageRanges": 1, "ReadRange": 1})
 			useBlobAPI(t, blob)
@@ -203,8 +206,11 @@ func TestGrantAccessAndOpenWaitsForActivation(t *testing.T) {
 			// PageRanges was retried rather than dropped, so the unallocated
 			// block is served without a range request.
 			reads := blob.callCount("ReadRange")
-			if _, err := reader.ReadAt(buf, 16); err != nil {
+			if _, err := reader.ReadAt(buf, azurediskfile.DefaultBlockSize); err != nil {
 				t.Fatal(err)
+			}
+			if string(buf) != string(make([]byte, len(buf))) {
+				t.Errorf("unallocated read %q, want zeros", buf)
 			}
 			if got := blob.callCount("ReadRange"); got != reads {
 				t.Errorf("unallocated read made %d range requests", got-reads)
