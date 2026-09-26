@@ -5,6 +5,7 @@ package snapshot
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"math"
 	"strings"
@@ -54,7 +55,9 @@ type snapshotClient interface {
 
 // GrantAccessAndOpen revokes a previous active SAS, grants a new read SAS for
 // 20 minutes, and opens the snapshot through the root package. The cleanup
-// function revokes the newly granted SAS and is safe to call more than once.
+// function revokes the newly granted SAS and reports a failed revocation,
+// which leaves the SAS active until it expires. Calling it again retries a
+// failed revocation and does nothing after a successful one.
 //
 // The credential is intentionally explicit. This function does not construct
 // DefaultAzureCredential and therefore cannot silently use an unintended
@@ -64,7 +67,7 @@ func GrantAccessAndOpen(
 	cred azcore.TokenCredential,
 	resourceID string,
 	cache azurediskfile.Cache[string, []byte],
-) (*io.SectionReader, func(), error) {
+) (*io.SectionReader, func() error, error) {
 	return GrantAccessAndOpenWithOptions(ctx, cred, resourceID, cache, Options{})
 }
 
@@ -76,7 +79,7 @@ func GrantAccessAndOpenWithOptions(
 	resourceID string,
 	cache azurediskfile.Cache[string, []byte],
 	options Options,
-) (*io.SectionReader, func(), error) {
+) (*io.SectionReader, func() error, error) {
 	if cred == nil {
 		return nil, nil, errors.New("snapshot: nil TokenCredential")
 	}
@@ -139,7 +142,7 @@ func grantAccessAndOpen(
 	durationSeconds int32,
 	cache azurediskfile.Cache[string, []byte],
 	options Options,
-) (*io.SectionReader, func(), error) {
+) (*io.SectionReader, func() error, error) {
 	// The state is read even when pre-revocation is skipped, so a missing
 	// snapshot or a missing permission is reported before access is granted.
 	state, err := client.DiskState(ctx)
@@ -160,15 +163,16 @@ func grantAccessAndOpen(
 	if err != nil {
 		// The grant can fail while polling after ARM has already issued the SAS.
 		if !foreignSAS {
-			revokeDetached(client)
+			err = errors.Join(err, revokeDetached(client))
 		}
 		return nil, nil, err
 	}
 	if sas == "" {
+		err := errors.New("snapshot: GrantAccess returned no SAS URI")
 		if !foreignSAS {
-			revokeDetached(client)
+			err = errors.Join(err, revokeDetached(client))
 		}
-		return nil, nil, errors.New("snapshot: GrantAccess returned no SAS URI")
+		return nil, nil, err
 	}
 
 	var sasOptions []azurediskfile.SASOption
@@ -177,26 +181,40 @@ func grantAccessAndOpen(
 	}
 	reader, err := azurediskfile.Open(ctx, azurediskfile.NewSASBlobAPI(sas, sasOptions...), cache)
 	if err != nil {
-		revokeDetached(client)
-		return nil, nil, err
+		return nil, nil, errors.Join(err, revokeDetached(client))
 	}
 
-	var once sync.Once
-	cleanup := func() {
+	var (
+		mu      sync.Mutex
+		revoked bool
+	)
+	cleanup := func() error {
 		if options.SkipRevokeOnCleanup {
-			return
+			return nil
 		}
-		once.Do(func() { revokeDetached(client) })
+		mu.Lock()
+		defer mu.Unlock()
+		if revoked {
+			return nil
+		}
+		if err := revokeDetached(client); err != nil {
+			return err
+		}
+		revoked = true
+		return nil
 	}
 	return reader, cleanup, nil
 }
 
 // revokeDetached revokes on a context of its own, so the SAS is still
 // withdrawn when the caller's context has already been cancelled.
-func revokeDetached(client snapshotClient) {
+func revokeDetached(client snapshotClient) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	_ = client.RevokeAccess(ctx)
+	if err := client.RevokeAccess(ctx); err != nil {
+		return fmt.Errorf("snapshot: revoke SAS: %w", err)
+	}
+	return nil
 }
 
 type armSnapshotClient struct {

@@ -21,12 +21,13 @@ import (
 
 // fakeSnapshotClient records the SAS lifecycle calls in the order they happen.
 type fakeSnapshotClient struct {
-	mu        sync.Mutex
-	state     armcompute.DiskState
-	sas       string
-	grantErr  error
-	calls     []string
-	durations []int32
+	mu             sync.Mutex
+	state          armcompute.DiskState
+	sas            string
+	grantErr       error
+	revokeFailures int
+	calls          []string
+	durations      []int32
 }
 
 func (c *fakeSnapshotClient) DiskState(context.Context) (armcompute.DiskState, error) {
@@ -51,6 +52,10 @@ func (c *fakeSnapshotClient) RevokeAccess(context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.calls = append(c.calls, "revoke")
+	if c.revokeFailures > 0 {
+		c.revokeFailures--
+		return errors.New("revoke failed")
+	}
 	return nil
 }
 
@@ -250,6 +255,39 @@ func TestGrantAccessAndOpen(t *testing.T) {
 		}
 		if got := client.revokes(); got != 1 {
 			t.Errorf("revocations = %d, want 1", got)
+		}
+	})
+
+	t.Run("cleanup reports a failed revocation and retries it", func(t *testing.T) {
+		client := newFakeClient(t, data)
+		client.revokeFailures = 1
+		_, cleanup, err := grantAccessAndOpen(t.Context(), client, durationSeconds, nil, Options{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := cleanup(); err == nil {
+			t.Fatal("cleanup hid a failed revocation")
+		}
+		if err := cleanup(); err != nil {
+			t.Fatalf("retried cleanup: %v", err)
+		}
+		if err := cleanup(); err != nil {
+			t.Fatalf("cleanup after success: %v", err)
+		}
+		if got := client.revokes(); got != 2 {
+			t.Errorf("revocations = %d, want 2", got)
+		}
+	})
+
+	t.Run("reports a failed revocation after a failed grant", func(t *testing.T) {
+		grantErr := errors.New("grant failed")
+		client := &fakeSnapshotClient{grantErr: grantErr, revokeFailures: 1}
+		_, _, err := grantAccessAndOpen(t.Context(), client, durationSeconds, nil, Options{})
+		if !errors.Is(err, grantErr) {
+			t.Fatalf("error = %v, want the grant error", err)
+		}
+		if !strings.Contains(err.Error(), "revoke SAS") {
+			t.Fatalf("error = %v, want the revocation failure too", err)
 		}
 	})
 

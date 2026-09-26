@@ -58,7 +58,12 @@ sr, cleanup, err := snapshot.GrantAccessAndOpen(ctx, cred, resourceID, cache)
 if err != nil {
     log.Fatal(err)
 }
-defer cleanup() // RevokeAccess
+defer func() {
+    // A failed revocation leaves the SAS active until it expires.
+    if err := cleanup(); err != nil {
+        log.Printf("revoke snapshot SAS: %v", err)
+    }
+}()
 ```
 
 Use `snapshot.GrantAccessAndOpenWithOptions` when the SAS duration or
