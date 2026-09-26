@@ -24,6 +24,12 @@ const (
 	snapshotResourceType  = "Microsoft.Compute/snapshots"
 )
 
+// Variables so tests can shorten the wait.
+var (
+	sasActivationTimeout  = 60 * time.Second
+	sasActivationInterval = 2 * time.Second
+)
+
 // Options configures snapshot SAS issuance and cleanup.
 //
 // A zero Duration uses the default 20-minute grant duration. By default,
@@ -51,12 +57,14 @@ type snapshotClient interface {
 }
 
 // GrantAccessAndOpen grants a read SAS for 20 minutes and opens the snapshot
-// through the root package. Granting replaces any SAS already active on the
-// snapshot, and the replaced SAS stops working, so a snapshot supports one
-// reader at a time. The cleanup function revokes the newly granted SAS and
-// reports a failed revocation, which leaves the SAS active until it expires.
-// Calling it again retries a failed revocation and does nothing after a
-// successful one.
+// through the root package. A new SAS can be rejected with 403 until Azure
+// propagates it, so opening retries 403 for up to 60 seconds. Granting
+// replaces any SAS already active on the snapshot, and the replaced SAS stops
+// working within about 30 seconds, so a snapshot supports one reader at a
+// time. The cleanup function revokes the newly granted SAS and reports a
+// failed revocation, which leaves the SAS active until it expires. Calling it
+// again retries a failed revocation and does nothing after a successful one.
+// A revoked SAS can also keep working for about 30 seconds.
 //
 // The credential is intentionally explicit. This function does not construct
 // DefaultAzureCredential and therefore cannot silently use an unintended
@@ -155,7 +163,7 @@ func grantAccessAndOpen(
 	if options.SkipRangeChecksum {
 		sasOptions = append(sasOptions, azurediskfile.WithoutRangeChecksum())
 	}
-	reader, err := azurediskfile.Open(ctx, azurediskfile.NewSASBlobAPI(sas, sasOptions...), cache)
+	reader, err := openGrantedSAS(ctx, sas, sasOptions, cache)
 	if err != nil {
 		return nil, nil, errors.Join(err, revokeDetached(client))
 	}
@@ -180,6 +188,30 @@ func grantAccessAndOpen(
 		return nil
 	}
 	return reader, cleanup, nil
+}
+
+// openGrantedSAS retries 403 because a new SAS can be rejected for up to 30
+// seconds while its stored access policy propagates.
+func openGrantedSAS(
+	ctx context.Context,
+	sas string,
+	sasOptions []azurediskfile.SASOption,
+	cache azurediskfile.Cache[string, []byte],
+) (*io.SectionReader, error) {
+	deadline := time.Now().Add(sasActivationTimeout)
+	for {
+		reader, err := azurediskfile.Open(ctx, azurediskfile.NewSASBlobAPI(sas, sasOptions...), cache)
+		var responseErr *azcore.ResponseError
+		if err == nil || !errors.As(err, &responseErr) || responseErr.StatusCode != http.StatusForbidden ||
+			time.Now().Add(sasActivationInterval).After(deadline) {
+			return reader, err
+		}
+		select {
+		case <-ctx.Done():
+			return nil, errors.Join(err, ctx.Err())
+		case <-time.After(sasActivationInterval):
+		}
+	}
 }
 
 // revokeDetached revokes on a context of its own, so the SAS is still

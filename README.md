@@ -85,6 +85,11 @@ already active on the snapshot, and the replaced SAS stops working, so a
 concurrent reader of the same snapshot fails with 403. Give each reader its own
 snapshot.
 
+SAS changes take up to about 30 seconds to reach Azure Storage. A new SAS can
+be rejected with 403 until then, so the `snapshot` package retries 403 for up
+to 60 seconds while opening. A revoked or replaced SAS can likewise keep
+working for that long.
+
 When a cache is shared between readers, the cache key includes the blob
 identifier. Implementations that do not expose `BlobIdentifier` receive a
 unique per-reader identifier, so those readers deliberately do not share
