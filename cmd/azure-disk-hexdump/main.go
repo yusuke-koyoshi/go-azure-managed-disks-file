@@ -18,11 +18,11 @@ func main() {
 	length := flag.Int("length", 512, "number of bytes")
 	skipChecksum := flag.Bool("skip-checksum", false, "skip per-range MD5 validation")
 	flag.Parse()
-	if *urlValue == "" {
-		*urlValue = os.Getenv("AZURE_SAS_URL")
-	}
 	if *urlValue == "" && flag.NArg() > 0 {
 		*urlValue = flag.Arg(0)
+	}
+	if *urlValue == "" {
+		*urlValue = os.Getenv("AZURE_SAS_URL")
 	}
 	if *urlValue == "" {
 		fmt.Fprintln(os.Stderr, "usage: AZURE_SAS_URL='...' azure-disk-hexdump [-offset N] [-length N] [-skip-checksum]")
