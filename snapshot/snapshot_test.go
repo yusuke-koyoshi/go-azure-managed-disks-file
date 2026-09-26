@@ -332,6 +332,34 @@ func TestGrantAccessAndOpenWithOptions(t *testing.T) {
 	}
 }
 
+func TestParseSnapshotID(t *testing.T) {
+	for _, test := range []struct {
+		resourceID string
+		wantErr    bool
+	}{
+		{resourceID: "/subscriptions/s/resourceGroups/g/providers/Microsoft.Compute/snapshots/n"},
+		{resourceID: "/subscriptions/s/resourceGroups/g/providers/microsoft.compute/Snapshots/n"},
+		{resourceID: "/subscriptions/s/resourceGroups/g/providers/Microsoft.Compute/disks/n", wantErr: true},
+		{resourceID: "/subscriptions/s/resourceGroups/g", wantErr: true},
+		{resourceID: "not-a-resource-id", wantErr: true},
+	} {
+		id, err := parseSnapshotID(test.resourceID)
+		if test.wantErr {
+			if err == nil {
+				t.Errorf("parseSnapshotID(%q) accepted a non-snapshot ID", test.resourceID)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("parseSnapshotID(%q): %v", test.resourceID, err)
+			continue
+		}
+		if id.Name != "n" || id.ResourceGroupName != "g" {
+			t.Errorf("parseSnapshotID(%q) = %s/%s, want g/n", test.resourceID, id.ResourceGroupName, id.Name)
+		}
+	}
+}
+
 func TestAccessDurationSeconds(t *testing.T) {
 	for _, test := range []struct {
 		duration time.Duration

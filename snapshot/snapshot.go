@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"math"
+	"strings"
 	"sync"
 	"time"
 
@@ -16,7 +17,10 @@ import (
 	azurediskfile "github.com/yusuke-koyoshi/go-azure-managed-disks-file"
 )
 
-const defaultAccessDuration = 20 * time.Minute
+const (
+	defaultAccessDuration = 20 * time.Minute
+	snapshotResourceType  = "Microsoft.Compute/snapshots"
+)
 
 // Options configures snapshot SAS issuance and cleanup.
 //
@@ -79,12 +83,9 @@ func GrantAccessAndOpenWithOptions(
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	id, err := arm.ParseResourceID(resourceID)
+	id, err := parseSnapshotID(resourceID)
 	if err != nil {
 		return nil, nil, err
-	}
-	if id.SubscriptionID == "" || id.ResourceGroupName == "" || id.Name == "" {
-		return nil, nil, errors.New("snapshot: resource ID must identify a snapshot")
 	}
 	durationSeconds, err := accessDurationSeconds(options.Duration)
 	if err != nil {
@@ -100,6 +101,20 @@ func GrantAccessAndOpenWithOptions(
 		name:          id.Name,
 	}
 	return grantAccessAndOpen(ctx, snapshots, durationSeconds, cache, options)
+}
+
+// parseSnapshotID requires resourceID to name a snapshot. Only the name reaches
+// the snapshots client, so a disk ID would otherwise hit a same-named snapshot.
+func parseSnapshotID(resourceID string) (*arm.ResourceID, error) {
+	id, err := arm.ParseResourceID(resourceID)
+	if err != nil {
+		return nil, err
+	}
+	if id.SubscriptionID == "" || id.ResourceGroupName == "" || id.Name == "" ||
+		!strings.EqualFold(id.ResourceType.String(), snapshotResourceType) {
+		return nil, errors.New("snapshot: resource ID must identify a snapshot")
+	}
+	return id, nil
 }
 
 // accessDurationSeconds converts a SAS lifetime into the int32 seconds the ARM
