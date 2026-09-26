@@ -125,6 +125,18 @@ positional argument remain supported:
 AZURE_SAS_URL='https://...' go run ./cmd/azure-disk-hexdump -offset 0 -length 512
 ```
 
+## Integration tests
+
+The `snapshot` package has tests that grant and revoke access on a real
+snapshot. They run only with the `integration` build tag and an
+`AZURE_SNAPSHOT_ID`, and they authenticate with the Azure CLI login. The
+snapshot must hold a GPT disk image, and no one else may be reading it.
+
+```sh
+AZURE_SNAPSHOT_ID=/subscriptions/.../providers/Microsoft.Compute/snapshots/NAME \
+  go test -tags integration ./snapshot
+```
+
 ## Packages
 
 | Package | Role | Dependencies |
