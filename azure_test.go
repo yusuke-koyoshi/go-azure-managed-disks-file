@@ -641,7 +641,7 @@ func md5Sum(value []byte) []byte {
 }
 
 func TestNewSASBlobAPIInvalidURLHidesSignature(t *testing.T) {
-	// The invalid escape makes url.Parse fail, and its error quotes the input.
+	// The invalid escape makes url.Parse fail.
 	api := NewSASBlobAPI("https://account.blob.core.windows.net/%zz?sv=test&sig=secret")
 	_, err := api.Size(context.Background())
 	if err == nil {

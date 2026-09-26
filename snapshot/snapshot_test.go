@@ -131,8 +131,6 @@ func TestGrantAccessAndOpen(t *testing.T) {
 		}
 	})
 
-	// Granting replaces an active SAS, so revoking one first only adds an
-	// ARM round trip.
 	t.Run("grants without revoking first", func(t *testing.T) {
 		client := newFakeClient(t, data)
 		if _, _, err := grantAccessAndOpen(t.Context(), client, durationSeconds, nil, Options{}); err != nil {
@@ -186,9 +184,6 @@ func TestGrantAccessAndOpen(t *testing.T) {
 		}
 	})
 
-	// The grant is a long-running operation, so an error can arrive after ARM
-	// has already issued the SAS. Revocation must not depend on the grant call
-	// reporting success.
 	t.Run("revokes when the grant fails", func(t *testing.T) {
 		client := &fakeSnapshotClient{grantErr: errors.New("grant failed")}
 		_, _, err := grantAccessAndOpen(t.Context(), client, durationSeconds, nil, Options{})
