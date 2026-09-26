@@ -137,17 +137,32 @@ func grantAccessAndOpen(
 		}
 	}
 
+	// A SAS that was already active on entry and deliberately kept belongs to
+	// another consumer: revoking it on a failed grant would break that
+	// consumer. Once pre-revocation has run, or the snapshot had no active
+	// SAS, any SAS active from here on is this call's own.
+	foreignSAS := options.SkipPreRevokeActiveSAS && state == armcompute.DiskStateActiveSAS
+
 	sas, err := client.GrantReadAccess(ctx, durationSeconds)
 	if err != nil {
 		// The grant is a long-running operation: it can fail while polling
 		// after ARM has already issued the SAS. Revoking is harmless when
-		// nothing was granted, so fail closed rather than leaving a SAS
-		// active for the whole duration with no cleanup handle returned.
-		revokeDetached(client)
+		// the only SAS that can be active is ours, so fail closed rather than
+		// leaving a SAS active for the whole duration with no cleanup handle
+		// returned. When a foreign SAS is being kept, the grant failure is
+		// reported without revoking, which leaves a SAS issued by a failed
+		// poll active until it expires.
+		if !foreignSAS {
+			revokeDetached(client)
+		}
 		return nil, nil, err
 	}
 	if sas == "" {
-		revokeDetached(client)
+		// An empty SAS is a failed grant too, so a kept foreign SAS is left
+		// alone for the same reason as above.
+		if !foreignSAS {
+			revokeDetached(client)
+		}
 		return nil, nil, errors.New("snapshot: GrantAccess returned no SAS URI")
 	}
 

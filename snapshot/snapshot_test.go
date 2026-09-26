@@ -209,6 +209,35 @@ func TestGrantAccessAndOpen(t *testing.T) {
 		}
 	})
 
+	// A kept active SAS belongs to another consumer, so a failed grant must
+	// not revoke it out from under that consumer.
+	t.Run("keeps a foreign SAS when the grant fails", func(t *testing.T) {
+		client := &fakeSnapshotClient{
+			state:    armcompute.DiskStateActiveSAS,
+			grantErr: errors.New("grant failed"),
+		}
+		options := Options{SkipPreRevokeActiveSAS: true}
+		_, _, err := grantAccessAndOpen(t.Context(), client, durationSeconds, nil, options)
+		if err == nil {
+			t.Fatal("grantAccessAndOpen succeeded with a failing grant")
+		}
+		if got := client.revokes(); got != 0 {
+			t.Errorf("revocations = %d, want 0", got)
+		}
+	})
+
+	t.Run("keeps a foreign SAS when the grant returns no SAS", func(t *testing.T) {
+		client := &fakeSnapshotClient{state: armcompute.DiskStateActiveSAS}
+		options := Options{SkipPreRevokeActiveSAS: true}
+		_, _, err := grantAccessAndOpen(t.Context(), client, durationSeconds, nil, options)
+		if err == nil {
+			t.Fatal("grantAccessAndOpen succeeded without a SAS URI")
+		}
+		if got := client.revokes(); got != 0 {
+			t.Errorf("revocations = %d, want 0", got)
+		}
+	})
+
 	t.Run("revokes when the reader cannot be opened", func(t *testing.T) {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			http.Error(w, "no such blob", http.StatusNotFound)
