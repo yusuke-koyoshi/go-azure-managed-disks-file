@@ -21,8 +21,6 @@ type noCache struct{}
 func (noCache) Add(string, []byte) bool   { return false }
 func (noCache) Get(string) ([]byte, bool) { return nil, false }
 
-// The snapshot must hold a GPT disk image, and it is granted and revoked
-// during the test.
 func integrationTarget(t *testing.T) (azcore.TokenCredential, string) {
 	t.Helper()
 	resourceID := os.Getenv("AZURE_SNAPSHOT_ID")

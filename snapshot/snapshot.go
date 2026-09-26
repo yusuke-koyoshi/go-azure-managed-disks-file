@@ -57,14 +57,12 @@ type snapshotClient interface {
 }
 
 // GrantAccessAndOpen grants a read SAS for 20 minutes and opens the snapshot
-// through the root package. A new SAS can be rejected with 403 until Azure
-// propagates it, so opening retries 403 for up to 60 seconds. Granting
-// replaces any SAS already active on the snapshot, and the replaced SAS stops
-// working within about 30 seconds, so a snapshot supports one reader at a
-// time. The cleanup function revokes the newly granted SAS and reports a
-// failed revocation, which leaves the SAS active until it expires. Calling it
-// again retries a failed revocation and does nothing after a successful one.
-// A revoked SAS can also keep working for about 30 seconds.
+// through the root package, retrying 403 for up to 60 seconds while the new
+// SAS propagates. Granting replaces any SAS already active on the snapshot,
+// so a snapshot supports one reader at a time. A replaced or revoked SAS keeps
+// working for about 30 seconds. The cleanup function revokes the SAS and
+// reports a failed revocation; calling it again retries a failed revocation
+// and does nothing after a successful one.
 //
 // The credential is intentionally explicit. This function does not construct
 // DefaultAzureCredential and therefore cannot silently use an unintended
