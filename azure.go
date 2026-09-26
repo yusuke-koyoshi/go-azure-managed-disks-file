@@ -462,12 +462,10 @@ func NewSASBlobAPI(sasURL string, options ...SASOption) BlobAPI {
 	}
 	parsed, err := url.Parse(sasURL)
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
-		if err == nil {
-			err = errors.New("invalid SAS URL")
-		}
+		// url.Parse errors quote the input, which would expose the signature.
 		return &sasBlobAPI{
-			initErr:           err,
-			identifier:        sasURL,
+			initErr:           errors.New("azurediskfile: invalid SAS URL"),
+			identifier:        "invalid-sas-url",
 			windowSize:        config.windowSize,
 			skipRangeChecksum: config.skipRangeChecksum,
 		}

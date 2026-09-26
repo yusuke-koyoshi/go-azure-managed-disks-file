@@ -640,6 +640,21 @@ func md5Sum(value []byte) []byte {
 	return sum[:]
 }
 
+func TestNewSASBlobAPIInvalidURLHidesSignature(t *testing.T) {
+	// The invalid escape makes url.Parse fail, and its error quotes the input.
+	api := NewSASBlobAPI("https://account.blob.core.windows.net/%zz?sv=test&sig=secret")
+	_, err := api.Size(context.Background())
+	if err == nil {
+		t.Fatal("Size succeeded with an invalid SAS URL")
+	}
+	if strings.Contains(err.Error(), "secret") {
+		t.Fatalf("error exposes the SAS signature: %v", err)
+	}
+	if id := api.(blobIdentifier).BlobIdentifier(); strings.Contains(id, "secret") {
+		t.Fatalf("identifier exposes the SAS signature: %q", id)
+	}
+}
+
 func TestValidateRangeContentMD5(t *testing.T) {
 	data := []byte("range data")
 	sum := md5.Sum(data)
