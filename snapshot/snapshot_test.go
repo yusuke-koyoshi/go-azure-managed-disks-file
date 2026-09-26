@@ -121,7 +121,9 @@ func TestGrantAccessAndOpen(t *testing.T) {
 			if err != nil {
 				t.Fatalf("%+v: %v", options, err)
 			}
-			cleanup()
+			if err := cleanup(); err != nil {
+				t.Fatalf("%+v: cleanup: %v", options, err)
+			}
 			if got := client.revokes(); got != 1 {
 				t.Errorf("%+v: revocations = %d, want 1", options, got)
 			}
@@ -147,8 +149,11 @@ func TestGrantAccessAndOpen(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		cleanup()
-		cleanup()
+		for range 2 {
+			if err := cleanup(); err != nil {
+				t.Fatalf("cleanup: %v", err)
+			}
+		}
 		if got := client.revokes(); got != 1 {
 			t.Errorf("revocations = %d, want 1", got)
 		}
@@ -161,7 +166,9 @@ func TestGrantAccessAndOpen(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		cleanup()
+		if err := cleanup(); err != nil {
+			t.Fatalf("cleanup: %v", err)
+		}
 		if got := client.revokes(); got != 0 {
 			t.Errorf("revocations = %d, want 0", got)
 		}

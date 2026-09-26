@@ -51,11 +51,11 @@ type snapshotClient interface {
 
 // GrantAccessAndOpen grants a read SAS for 20 minutes and opens the snapshot
 // through the root package. Granting replaces any SAS already active on the
-// snapshot, which stops working, so a snapshot supports one reader at a time.
-// The cleanup
-// function revokes the newly granted SAS and reports a failed revocation,
-// which leaves the SAS active until it expires. Calling it again retries a
-// failed revocation and does nothing after a successful one.
+// snapshot, and the replaced SAS stops working, so a snapshot supports one
+// reader at a time. The cleanup function revokes the newly granted SAS and
+// reports a failed revocation, which leaves the SAS active until it expires.
+// Calling it again retries a failed revocation and does nothing after a
+// successful one.
 //
 // The credential is intentionally explicit. This function does not construct
 // DefaultAzureCredential and therefore cannot silently use an unintended
