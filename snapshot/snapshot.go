@@ -24,12 +24,6 @@ const (
 	snapshotResourceType  = "Microsoft.Compute/snapshots"
 )
 
-// Variables so tests can shorten the wait.
-var (
-	sasActivationTimeout  = 60 * time.Second
-	sasActivationInterval = 2 * time.Second
-)
-
 // Options configures snapshot SAS issuance and cleanup.
 //
 // A zero Duration uses the default 20-minute grant duration. By default,
@@ -57,8 +51,8 @@ type snapshotClient interface {
 }
 
 // GrantAccessAndOpen grants a read SAS for 20 minutes and opens the snapshot
-// through the root package, retrying 403 for up to 60 seconds while the new
-// SAS propagates. Granting replaces any SAS already active on the snapshot,
+// through the root package. For 60 seconds after the grant, every request
+// retries 403 while the new SAS propagates. Granting replaces any SAS already active on the snapshot,
 // so a snapshot supports one reader at a time. A replaced or revoked SAS keeps
 // working for about 30 seconds. The cleanup function revokes the SAS and
 // reports a failed revocation; calling it again retries a failed revocation
@@ -161,7 +155,11 @@ func grantAccessAndOpen(
 	if options.SkipRangeChecksum {
 		sasOptions = append(sasOptions, azurediskfile.WithoutRangeChecksum())
 	}
-	reader, err := openGrantedSAS(ctx, sas, sasOptions, cache)
+	api := &activatingBlobAPI{
+		api:      newSASBlobAPI(sas, sasOptions...),
+		activeBy: time.Now().Add(sasActivationTimeout),
+	}
+	reader, err := azurediskfile.Open(ctx, api, cache)
 	if err != nil {
 		return nil, nil, errors.Join(err, revokeDetached(client))
 	}
@@ -186,30 +184,6 @@ func grantAccessAndOpen(
 		return nil
 	}
 	return reader, cleanup, nil
-}
-
-// openGrantedSAS retries 403 because a new SAS can be rejected for up to 30
-// seconds while its stored access policy propagates.
-func openGrantedSAS(
-	ctx context.Context,
-	sas string,
-	sasOptions []azurediskfile.SASOption,
-	cache azurediskfile.Cache[string, []byte],
-) (*io.SectionReader, error) {
-	deadline := time.Now().Add(sasActivationTimeout)
-	for {
-		reader, err := azurediskfile.Open(ctx, azurediskfile.NewSASBlobAPI(sas, sasOptions...), cache)
-		var responseErr *azcore.ResponseError
-		if err == nil || !errors.As(err, &responseErr) || responseErr.StatusCode != http.StatusForbidden ||
-			time.Now().Add(sasActivationInterval).After(deadline) {
-			return reader, err
-		}
-		select {
-		case <-ctx.Done():
-			return nil, errors.Join(err, ctx.Err())
-		case <-time.After(sasActivationInterval):
-		}
-	}
 }
 
 // revokeDetached revokes on a context of its own, so the SAS is still

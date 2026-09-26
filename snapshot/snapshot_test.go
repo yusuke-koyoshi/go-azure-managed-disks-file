@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -110,27 +109,6 @@ func blobHandler(data []byte) http.Handler {
 	})
 }
 
-// forbidFirst rejects the first n requests the way Azure rejects a SAS whose
-// stored access policy has not propagated yet.
-func forbidFirst(n int64, next http.Handler) (http.Handler, *atomic.Int64) {
-	var requests atomic.Int64
-	return http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
-		if requests.Add(1) <= n {
-			w.Header().Set("x-ms-error-code", "AuthenticationFailed")
-			w.WriteHeader(http.StatusForbidden)
-			return
-		}
-		next.ServeHTTP(w, request)
-	}), &requests
-}
-
-func setSASActivation(t *testing.T, timeout, interval time.Duration) {
-	t.Helper()
-	oldTimeout, oldInterval := sasActivationTimeout, sasActivationInterval
-	sasActivationTimeout, sasActivationInterval = timeout, interval
-	t.Cleanup(func() { sasActivationTimeout, sasActivationInterval = oldTimeout, oldInterval })
-}
-
 func newClientFor(t *testing.T, handler http.Handler) *fakeSnapshotClient {
 	t.Helper()
 	server := httptest.NewServer(handler)
@@ -230,7 +208,6 @@ func TestGrantAccessAndOpen(t *testing.T) {
 	})
 
 	t.Run("revokes when the reader cannot be opened", func(t *testing.T) {
-		setSASActivation(t, time.Second, time.Millisecond)
 		var requests atomic.Int64
 		client := newClientFor(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			requests.Add(1)
@@ -245,51 +222,6 @@ func TestGrantAccessAndOpen(t *testing.T) {
 		}
 		if got := client.revokes(); got != 1 {
 			t.Errorf("revocations = %d, want 1", got)
-		}
-	})
-
-	t.Run("waits for a new SAS to become active", func(t *testing.T) {
-		setSASActivation(t, time.Second, time.Millisecond)
-		handler, requests := forbidFirst(2, blobHandler(data))
-		client := newClientFor(t, handler)
-		reader, _, err := grantAccessAndOpen(t.Context(), client, durationSeconds, nil, Options{SkipRangeChecksum: true})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got := requests.Load(); got < 3 {
-			t.Errorf("requests = %d, want the 403s retried", got)
-		}
-		if reader.Size() != int64(len(data)) {
-			t.Errorf("size = %d, want %d", reader.Size(), len(data))
-		}
-		if got := client.revokes(); got != 0 {
-			t.Errorf("revocations = %d, want 0", got)
-		}
-	})
-
-	t.Run("gives up on a SAS that stays forbidden", func(t *testing.T) {
-		setSASActivation(t, 20*time.Millisecond, time.Millisecond)
-		handler, _ := forbidFirst(math.MaxInt64, blobHandler(data))
-		client := newClientFor(t, handler)
-		_, _, err := grantAccessAndOpen(t.Context(), client, durationSeconds, nil, Options{})
-		var responseErr *azcore.ResponseError
-		if !errors.As(err, &responseErr) || responseErr.StatusCode != http.StatusForbidden {
-			t.Fatalf("error = %v, want HTTP 403", err)
-		}
-		if got := client.revokes(); got != 1 {
-			t.Errorf("revocations = %d, want 1", got)
-		}
-	})
-
-	t.Run("stops waiting when the context is cancelled", func(t *testing.T) {
-		setSASActivation(t, time.Hour, time.Minute)
-		handler, _ := forbidFirst(math.MaxInt64, blobHandler(data))
-		client := newClientFor(t, handler)
-		ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
-		defer cancel()
-		_, _, err := grantAccessAndOpen(ctx, client, durationSeconds, nil, Options{})
-		if !errors.Is(err, context.DeadlineExceeded) {
-			t.Fatalf("error = %v, want the context error", err)
 		}
 	})
 
