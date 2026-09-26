@@ -24,6 +24,7 @@ type fakeSnapshotClient struct {
 	sas            string
 	grantErr       error
 	revokeFailures int
+	revokeErr      error
 	calls          []string
 	durations      []int32
 }
@@ -47,7 +48,7 @@ func (c *fakeSnapshotClient) RevokeAccess(context.Context) error {
 		c.revokeFailures--
 		return errors.New("revoke failed")
 	}
-	return nil
+	return c.revokeErr
 }
 
 func (c *fakeSnapshotClient) recorded() []string {
@@ -244,6 +245,30 @@ func TestGrantAccessAndOpen(t *testing.T) {
 		}
 		if !strings.Contains(err.Error(), "revoke SAS") {
 			t.Fatalf("error = %v, want the revocation failure too", err)
+		}
+	})
+
+	t.Run("treats a missing snapshot as revoked", func(t *testing.T) {
+		client := newFakeClient(t, data)
+		client.revokeErr = &azcore.ResponseError{StatusCode: http.StatusNotFound}
+		_, cleanup, err := grantAccessAndOpen(t.Context(), client, durationSeconds, nil, Options{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := cleanup(); err != nil {
+			t.Fatalf("cleanup: %v", err)
+		}
+	})
+
+	t.Run("reports other revocation status codes", func(t *testing.T) {
+		client := newFakeClient(t, data)
+		client.revokeErr = &azcore.ResponseError{StatusCode: http.StatusForbidden}
+		_, cleanup, err := grantAccessAndOpen(t.Context(), client, durationSeconds, nil, Options{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := cleanup(); err == nil {
+			t.Fatal("cleanup hid a forbidden revocation")
 		}
 	})
 

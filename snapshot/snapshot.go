@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"net/http"
 	"strings"
 	"sync"
 	"time"
@@ -186,10 +187,13 @@ func grantAccessAndOpen(
 func revokeDetached(client snapshotClient) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	if err := client.RevokeAccess(ctx); err != nil {
-		return fmt.Errorf("snapshot: revoke SAS: %w", err)
+	err := client.RevokeAccess(ctx)
+	// A deleted snapshot has no SAS left to revoke.
+	var responseErr *azcore.ResponseError
+	if err == nil || errors.As(err, &responseErr) && responseErr.StatusCode == http.StatusNotFound {
+		return nil
 	}
-	return nil
+	return fmt.Errorf("snapshot: revoke SAS: %w", err)
 }
 
 type armSnapshotClient struct {
