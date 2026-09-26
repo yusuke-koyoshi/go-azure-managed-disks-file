@@ -76,10 +76,14 @@ sr, cleanup, err := snapshot.GrantAccessAndOpenWithOptions(ctx, cred, resourceID
 ```
 
 `Duration: 0` uses a 20-minute SAS. Both `GrantAccessAndOpen` and
-`GrantAccessAndOpenWithOptions` pre-revoke an existing active SAS, revoke the
-newly granted SAS during cleanup, and validate range checksums by default. Set
-`SkipPreRevokeActiveSAS`, `SkipRevokeOnCleanup` or `SkipRangeChecksum` only to
-explicitly opt out.
+`GrantAccessAndOpenWithOptions` revoke the SAS during cleanup and validate
+range checksums by default. Set `SkipRevokeOnCleanup` or `SkipRangeChecksum`
+only to explicitly opt out.
+
+A snapshot supports one reader at a time. Granting access replaces any SAS
+already active on the snapshot, and the replaced SAS stops working, so a
+concurrent reader of the same snapshot fails with 403. Give each reader its own
+snapshot.
 
 When a cache is shared between readers, the cache key includes the blob
 identifier. Implementations that do not expose `BlobIdentifier` receive a

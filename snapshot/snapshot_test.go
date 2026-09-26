@@ -16,25 +16,16 @@ import (
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
-	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute"
 )
 
 // fakeSnapshotClient records the SAS lifecycle calls in the order they happen.
 type fakeSnapshotClient struct {
 	mu             sync.Mutex
-	state          armcompute.DiskState
 	sas            string
 	grantErr       error
 	revokeFailures int
 	calls          []string
 	durations      []int32
-}
-
-func (c *fakeSnapshotClient) DiskState(context.Context) (armcompute.DiskState, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.calls = append(c.calls, "state")
-	return c.state, nil
 }
 
 func (c *fakeSnapshotClient) GrantReadAccess(_ context.Context, durationSeconds int32) (string, error) {
@@ -121,9 +112,8 @@ func TestGrantAccessAndOpen(t *testing.T) {
 	const durationSeconds = 1200
 	data := []byte("snapshot payload")
 
-	// A SAS left behind keeps the snapshot in the ActiveSAS state, which
-	// makes the next grant fail, so revocation must not depend on any
-	// Options field being set.
+	// A SAS left behind stays readable until it expires, so revocation must
+	// not depend on any Options field being set.
 	t.Run("revokes on cleanup", func(t *testing.T) {
 		for _, options := range []Options{{}, {Duration: 45 * time.Minute}} {
 			client := newFakeClient(t, data)
@@ -138,26 +128,14 @@ func TestGrantAccessAndOpen(t *testing.T) {
 		}
 	})
 
-	t.Run("revokes an active SAS before granting", func(t *testing.T) {
+	// Granting replaces an active SAS, so revoking one first only adds an
+	// ARM round trip.
+	t.Run("grants without revoking first", func(t *testing.T) {
 		client := newFakeClient(t, data)
-		client.state = armcompute.DiskStateActiveSAS
 		if _, _, err := grantAccessAndOpen(t.Context(), client, durationSeconds, nil, Options{}); err != nil {
 			t.Fatal(err)
 		}
-		want := []string{"state", "revoke", "grant"}
-		if got := client.recorded(); !slices.Equal(got, want) {
-			t.Errorf("calls = %v, want %v", got, want)
-		}
-	})
-
-	t.Run("keeps an active SAS when pre-revocation is skipped", func(t *testing.T) {
-		client := newFakeClient(t, data)
-		client.state = armcompute.DiskStateActiveSAS
-		options := Options{SkipPreRevokeActiveSAS: true}
-		if _, _, err := grantAccessAndOpen(t.Context(), client, durationSeconds, nil, options); err != nil {
-			t.Fatal(err)
-		}
-		want := []string{"state", "grant"}
+		want := []string{"grant"}
 		if got := client.recorded(); !slices.Equal(got, want) {
 			t.Errorf("calls = %v, want %v", got, want)
 		}
@@ -211,35 +189,6 @@ func TestGrantAccessAndOpen(t *testing.T) {
 		}
 		if got := client.revokes(); got != 1 {
 			t.Errorf("revocations = %d, want 1", got)
-		}
-	})
-
-	// A kept active SAS belongs to another consumer, so a failed grant must
-	// not revoke it out from under that consumer.
-	t.Run("keeps a foreign SAS when the grant fails", func(t *testing.T) {
-		client := &fakeSnapshotClient{
-			state:    armcompute.DiskStateActiveSAS,
-			grantErr: errors.New("grant failed"),
-		}
-		options := Options{SkipPreRevokeActiveSAS: true}
-		_, _, err := grantAccessAndOpen(t.Context(), client, durationSeconds, nil, options)
-		if err == nil {
-			t.Fatal("grantAccessAndOpen succeeded with a failing grant")
-		}
-		if got := client.revokes(); got != 0 {
-			t.Errorf("revocations = %d, want 0", got)
-		}
-	})
-
-	t.Run("keeps a foreign SAS when the grant returns no SAS", func(t *testing.T) {
-		client := &fakeSnapshotClient{state: armcompute.DiskStateActiveSAS}
-		options := Options{SkipPreRevokeActiveSAS: true}
-		_, _, err := grantAccessAndOpen(t.Context(), client, durationSeconds, nil, options)
-		if err == nil {
-			t.Fatal("grantAccessAndOpen succeeded without a SAS URI")
-		}
-		if got := client.revokes(); got != 0 {
-			t.Errorf("revocations = %d, want 0", got)
 		}
 	})
 

@@ -26,15 +26,12 @@ const (
 // Options configures snapshot SAS issuance and cleanup.
 //
 // A zero Duration uses the default 20-minute grant duration. By default,
-// GrantAccessAndOpenWithOptions revokes an existing active SAS before granting
-// access, revokes the new SAS during cleanup, and validates range checksums.
-// Set the Skip fields only when deliberately opting out of those safety
-// behaviors.
+// GrantAccessAndOpenWithOptions revokes the SAS during cleanup and validates
+// range checksums. Set the Skip fields only when deliberately opting out of
+// those safety behaviors.
 type Options struct {
 	// Duration is the SAS lifetime. Zero uses the 20-minute default.
 	Duration time.Duration
-	// SkipPreRevokeActiveSAS skips revoking an existing active SAS when true.
-	SkipPreRevokeActiveSAS bool
 	// SkipRevokeOnCleanup skips revoking the granted SAS during cleanup when true.
 	SkipRevokeOnCleanup bool
 	// SkipRangeChecksum disables per-range MD5 validation when true. Validation
@@ -48,13 +45,14 @@ type Options struct {
 // It covers the SAS lifecycle, which is the security-relevant behavior here,
 // and lets that lifecycle be exercised without ARM.
 type snapshotClient interface {
-	DiskState(ctx context.Context) (armcompute.DiskState, error)
 	GrantReadAccess(ctx context.Context, durationSeconds int32) (string, error)
 	RevokeAccess(ctx context.Context) error
 }
 
-// GrantAccessAndOpen revokes a previous active SAS, grants a new read SAS for
-// 20 minutes, and opens the snapshot through the root package. The cleanup
+// GrantAccessAndOpen grants a read SAS for 20 minutes and opens the snapshot
+// through the root package. Granting replaces any SAS already active on the
+// snapshot, which stops working, so a snapshot supports one reader at a time.
+// The cleanup
 // function revokes the newly granted SAS and reports a failed revocation,
 // which leaves the SAS active until it expires. Calling it again retries a
 // failed revocation and does nothing after a successful one.
@@ -143,36 +141,13 @@ func grantAccessAndOpen(
 	cache azurediskfile.Cache[string, []byte],
 	options Options,
 ) (*io.SectionReader, func() error, error) {
-	// The state is read even when pre-revocation is skipped, so a missing
-	// snapshot or a missing permission is reported before access is granted.
-	state, err := client.DiskState(ctx)
-	if err != nil {
-		return nil, nil, err
-	}
-	if !options.SkipPreRevokeActiveSAS && state == armcompute.DiskStateActiveSAS {
-		if err := client.RevokeAccess(ctx); err != nil {
-			return nil, nil, err
-		}
-	}
-
-	// A kept active SAS belongs to another consumer, so a failed grant must
-	// not revoke it.
-	foreignSAS := options.SkipPreRevokeActiveSAS && state == armcompute.DiskStateActiveSAS
-
 	sas, err := client.GrantReadAccess(ctx, durationSeconds)
 	if err != nil {
 		// The grant can fail while polling after ARM has already issued the SAS.
-		if !foreignSAS {
-			err = errors.Join(err, revokeDetached(client))
-		}
-		return nil, nil, err
+		return nil, nil, errors.Join(err, revokeDetached(client))
 	}
 	if sas == "" {
-		err := errors.New("snapshot: GrantAccess returned no SAS URI")
-		if !foreignSAS {
-			err = errors.Join(err, revokeDetached(client))
-		}
-		return nil, nil, err
+		return nil, nil, errors.Join(errors.New("snapshot: GrantAccess returned no SAS URI"), revokeDetached(client))
 	}
 
 	var sasOptions []azurediskfile.SASOption
@@ -221,17 +196,6 @@ type armSnapshotClient struct {
 	client        *armcompute.SnapshotsClient
 	resourceGroup string
 	name          string
-}
-
-func (c *armSnapshotClient) DiskState(ctx context.Context) (armcompute.DiskState, error) {
-	response, err := c.client.Get(ctx, c.resourceGroup, c.name, nil)
-	if err != nil {
-		return "", err
-	}
-	if response.Properties == nil || response.Properties.DiskState == nil {
-		return "", nil
-	}
-	return *response.Properties.DiskState, nil
 }
 
 func (c *armSnapshotClient) GrantReadAccess(ctx context.Context, durationSeconds int32) (string, error) {
