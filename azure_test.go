@@ -374,6 +374,76 @@ func TestReadAtReturnsPartialBytesOnCancellation(t *testing.T) {
 	}
 }
 
+type failingRangeBlob struct {
+	*testBlob
+	failOff int64
+	err     error
+}
+
+func (b *failingRangeBlob) ReadRange(ctx context.Context, off, count int64) ([]byte, error) {
+	if off == b.failOff {
+		return nil, b.err
+	}
+	return b.testBlob.ReadRange(ctx, off, count)
+}
+
+func TestReadAtReportsBytesBeforeFailingBlock(t *testing.T) {
+	errFail := errors.New("range failed")
+	// Block 1 fails; the other blocks in the read are still fetched.
+	for _, test := range []struct {
+		off          int64
+		wantN        int
+		wantRequests int64
+	}{
+		{off: 0, wantN: 4, wantRequests: 2},
+		{off: 2, wantN: 2, wantRequests: 2},
+		{off: 4, wantN: 0, wantRequests: 1},
+	} {
+		api := &failingRangeBlob{testBlob: &testBlob{id: "failing", data: []byte("0123456789ab")}, failOff: 4, err: errFail}
+		reader, err := OpenWithOptions(context.Background(), api, nil, OpenOptions{BlockSize: 4})
+		if err != nil {
+			t.Fatal(err)
+		}
+		n, err := reader.ReadAt(make([]byte, 12-test.off), test.off)
+		if n != test.wantN || !errors.Is(err, errFail) {
+			t.Fatalf("ReadAt(off=%d) = %d, %v; want %d, %v", test.off, n, err, test.wantN, errFail)
+		}
+		if got := api.requests.Load(); got != test.wantRequests {
+			t.Fatalf("ReadAt(off=%d) made %d successful requests, want %d", test.off, got, test.wantRequests)
+		}
+	}
+}
+
+type panickingBlob struct{ *testBlob }
+
+func (panickingBlob) ReadRange(context.Context, int64, int64) ([]byte, error) { panic("ReadRange") }
+
+func TestReadAtSingleBlockPanicReachesCaller(t *testing.T) {
+	reader, err := OpenWithOptions(context.Background(), panickingBlob{&testBlob{id: "panic", data: make([]byte, 8)}}, nil, OpenOptions{BlockSize: 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if recover() == nil {
+			t.Fatal("ReadAt did not panic in the caller's goroutine")
+		}
+	}()
+	_, _ = reader.ReadAt(make([]byte, 2), 1)
+}
+
+func TestReadAtRejectsShortCachedBlock(t *testing.T) {
+	api := &testBlob{id: "short", data: []byte("01234567")}
+	cache := &testCache{values: map[string][]byte{"short:4:1": []byte("45")}}
+	reader, err := OpenWithOptions(context.Background(), api, cache, OpenOptions{BlockSize: 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	n, err := reader.ReadAt(make([]byte, 8), 0)
+	if n != 4 || !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("ReadAt = %d, %v; want 4, %v", n, err, io.ErrUnexpectedEOF)
+	}
+}
+
 func TestOpenMaxConcurrentBlocks(t *testing.T) {
 	api := &testBlob{
 		id:      "bounded",

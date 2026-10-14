@@ -164,44 +164,25 @@ func (r *blobReader) ReadAt(p []byte, off int64) (int, error) {
 		return 0, err
 	}
 
+	if off >= r.sizeValue {
+		return 0, io.EOF
+	}
+	end := min(off+int64(len(p)), r.sizeValue)
 	first := off / r.blockSize
-	last := (off + int64(len(p)) - 1) / r.blockSize
-	blocks := make([][]byte, last-first+1)
-	errs := make([]error, len(blocks))
-	var wg sync.WaitGroup
-	for i := range blocks {
-		blockNumber := first + int64(i)
-		wg.Add(1)
-		go func(i int, number int64) {
-			defer wg.Done()
-			blocks[i], errs[i] = r.loadBlock(number)
-		}(i, blockNumber)
-	}
-	wg.Wait()
-
-	n := 0
-	var firstErr error
-	for i, block := range blocks {
-		blockStart := (first + int64(i)) * r.blockSize
-		start := maxInt64(off, blockStart)
-		end := minInt64(off+int64(len(p)), blockStart+int64(len(block)))
-		if errs[i] != nil {
-			firstErr = errs[i]
-			break
-		}
-		if end <= start {
-			continue
-		}
-		copied := copy(p[start-off:end-off], block[start-blockStart:end-blockStart])
-		n += copied
-		if copied != int(end-start) {
-			firstErr = io.ErrUnexpectedEOF
-			break
+	last := (end - 1) / r.blockSize
+	errs := r.readBlocks(p[:end-off], off, first, last)
+	for i, err := range errs {
+		if err != nil {
+			// p is scratch space on error, so later blocks may already be
+			// copied past n.
+			n := 0
+			if blockStart := (first + int64(i)) * r.blockSize; blockStart > off {
+				n = int(blockStart - off)
+			}
+			return n, err
 		}
 	}
-	if firstErr != nil {
-		return n, firstErr
-	}
+	n := int(end - off)
 	if n != len(p) {
 		return n, io.EOF
 	}
@@ -224,16 +205,68 @@ func (r *blobReader) ReadAt(p []byte, off int64) (int, error) {
 	return n, nil
 }
 
-func (r *blobReader) loadBlock(number int64) ([]byte, error) {
+// readBlocks copies the blocks first to last into p, which holds the bytes
+// from off, and returns the error of each block. Fetched blocks are copied as
+// soon as they arrive, so only the blocks in flight are held outside the cache.
+func (r *blobReader) readBlocks(p []byte, off, first, last int64) []error {
+	type block struct {
+		number int64
+		key    string
+	}
+	errs := make([]error, last-first+1)
+	var missing []block
+	for i := range errs {
+		number := first + int64(i)
+		key := r.blockKey(number)
+		if value, ok := r.cache.Get(key); ok {
+			errs[i] = r.copyBlock(p, off, number, value)
+			continue
+		}
+		missing = append(missing, block{number, key})
+	}
+	if len(missing) == 1 {
+		// Most reads fall within one block; skip the goroutine for them.
+		b := missing[0]
+		errs[b.number-first] = r.fetchInto(p, off, b.number, b.key)
+		return errs
+	}
+	var wg sync.WaitGroup
+	for _, b := range missing {
+		wg.Go(func() { errs[b.number-first] = r.fetchInto(p, off, b.number, b.key) })
+	}
+	wg.Wait()
+	return errs
+}
+
+func (r *blobReader) fetchInto(p []byte, off, number int64, key string) error {
+	value, err := r.fetchBlock(number, key)
+	if err != nil {
+		return err
+	}
+	return r.copyBlock(p, off, number, value)
+}
+
+// copyBlock copies the part of block number that p, which holds the bytes
+// from off, covers.
+func (r *blobReader) copyBlock(p []byte, off, number int64, block []byte) error {
+	blockStart := number * r.blockSize
+	start := max(off, blockStart)
+	end := min(off+int64(len(p)), blockStart+r.blockSize)
+	if int64(len(block)) < end-blockStart {
+		return io.ErrUnexpectedEOF
+	}
+	copy(p[start-off:end-off], block[start-blockStart:end-blockStart])
+	return nil
+}
+
+func (r *blobReader) blockKey(number int64) string {
+	return fmt.Sprintf("%s:%d:%d", r.id, r.blockSize, number)
+}
+
+func (r *blobReader) fetchBlock(number int64, key string) ([]byte, error) {
 	ctx := r.ctx
 	if err := ctx.Err(); err != nil {
 		return nil, err
-	}
-	key := fmt.Sprintf("%s:%d:%d", r.id, r.blockSize, number)
-	if r.cache != nil {
-		if value, ok := r.cache.Get(key); ok {
-			return value, nil
-		}
 	}
 	value, err, _ := r.group.Do(key, func() (any, error) {
 		if err := ctx.Err(); err != nil {
@@ -304,7 +337,11 @@ func (r *blobReader) releaseBlock() {
 
 func (r *blobReader) prefetch(number int64) {
 	go func() {
-		_, _ = r.loadBlock(number)
+		key := r.blockKey(number)
+		if _, ok := r.cache.Get(key); ok {
+			return
+		}
+		_, _ = r.fetchBlock(number, key)
 	}()
 }
 
@@ -645,13 +682,6 @@ func (m *mockBlobAPI) PageRanges(context.Context) ([]Range, error) { return nil,
 
 func minInt64(a, b int64) int64 {
 	if a < b {
-		return a
-	}
-	return b
-}
-
-func maxInt64(a, b int64) int64 {
-	if a > b {
 		return a
 	}
 	return b
