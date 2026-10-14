@@ -24,6 +24,7 @@ type testBlob struct {
 	data      []byte
 	ranges    []Range
 	delay     chan struct{}
+	latency   time.Duration
 	started   chan struct{}
 	requests  atomic.Int64
 	active    atomic.Int64
@@ -58,6 +59,9 @@ func (b *testBlob) ReadRange(ctx context.Context, off, count int64) ([]byte, err
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		}
+	}
+	if b.latency > 0 {
+		time.Sleep(b.latency)
 	}
 	if off < 0 || off+count > int64(len(b.data)) {
 		return nil, io.ErrUnexpectedEOF
@@ -443,14 +447,17 @@ func BenchmarkReadAtPrefetch(b *testing.B) {
 	const blockSize = 1 << 10
 	data := bytes.Repeat([]byte("x"), 256*blockSize)
 	blocks := int64(len(data) / blockSize)
+	const smallRead = blockSize / 8
 	for _, bench := range []struct {
-		name   string
-		offset func(i int64) int64
+		name     string
+		readSize int64
+		offset   func(i int64) int64
 	}{
-		{name: "sequential", offset: func(i int64) int64 { return (i % blocks) * blockSize }},
+		{name: "sequential", readSize: blockSize, offset: func(i int64) int64 { return (i % blocks) * blockSize }},
+		{name: "sequential-small", readSize: smallRead, offset: func(i int64) int64 { return (i * smallRead) % int64(len(data)) }},
 		// A stride coprime with the block count visits every block without
 		// ever landing next to the previous read.
-		{name: "random", offset: func(i int64) int64 { return ((i * 97) % blocks) * blockSize }},
+		{name: "random", readSize: blockSize, offset: func(i int64) int64 { return ((i * 97) % blocks) * blockSize }},
 	} {
 		b.Run(bench.name, func(b *testing.B) {
 			api := &testBlob{id: bench.name, data: data}
@@ -461,9 +468,90 @@ func BenchmarkReadAtPrefetch(b *testing.B) {
 			if err != nil {
 				b.Fatal(err)
 			}
-			buf := make([]byte, blockSize)
+			buf := make([]byte, bench.readSize)
 			for i := 0; b.Loop(); i++ {
 				if _, err := reader.ReadAt(buf, bench.offset(int64(i))); err != nil {
+					b.Fatal(err)
+				}
+			}
+			b.ReportMetric(float64(api.requests.Load())/float64(b.N), "requests/op")
+		})
+	}
+}
+
+type noCache struct{}
+
+func (noCache) Add(string, []byte) bool   { return false }
+func (noCache) Get(string) ([]byte, bool) { return nil, false }
+
+func BenchmarkReadAt(b *testing.B) {
+	const (
+		blockSize = int64(DefaultBlockSize)
+		blocks    = 16
+		smallRead = 4 << 10
+	)
+	data := bytes.Repeat([]byte("x"), blocks*int(blockSize))
+	for _, bench := range []struct {
+		name     string
+		cache    func() Cache[string, []byte]
+		ranges   []Range
+		readSize int64
+		offset   func(i int64) int64
+	}{
+		{
+			name:     "uncached-1block",
+			cache:    func() Cache[string, []byte] { return noCache{} },
+			readSize: smallRead,
+			offset:   func(i int64) int64 { return (i*7)%blocks*blockSize + 512 },
+		},
+		{
+			name:     "uncached-2blocks",
+			cache:    func() Cache[string, []byte] { return noCache{} },
+			readSize: smallRead,
+			offset:   func(i int64) int64 { return (i*7)%(blocks-1)*blockSize + blockSize - smallRead/2 },
+		},
+		{
+			name:     "uncached-4blocks",
+			cache:    func() Cache[string, []byte] { return noCache{} },
+			readSize: 4 * blockSize,
+			offset:   func(i int64) int64 { return (i * 4) % blocks * blockSize },
+		},
+		{
+			name:     "cached-1block",
+			cache:    func() Cache[string, []byte] { return newMemoryCache(blocks) },
+			readSize: smallRead,
+			offset:   func(i int64) int64 { return (i*7)%blocks*blockSize + 512 },
+		},
+		{
+			// Only block 0 is allocated. Each read of it is followed by reads
+			// of four unallocated blocks through a cache that holds four.
+			name:     "unallocated-small-cache",
+			cache:    func() Cache[string, []byte] { return newMemoryCache(4) },
+			ranges:   []Range{{Start: 0, End: blockSize - 1}},
+			readSize: smallRead,
+			offset: func(i int64) int64 {
+				if i%5 == 0 {
+					return 0
+				}
+				return (1 + i%(blocks-1)) * blockSize
+			},
+		},
+	} {
+		b.Run(bench.name, func(b *testing.B) {
+			api := &testBlob{id: bench.name, data: data, ranges: bench.ranges, latency: 100 * time.Microsecond}
+			reader, err := OpenWithOptions(context.Background(), api, bench.cache(), OpenOptions{BlockSize: blockSize})
+			if err != nil {
+				b.Fatal(err)
+			}
+			buf := make([]byte, bench.readSize)
+			for i := range int64(blocks) {
+				if _, err := reader.ReadAt(buf, bench.offset(i)); err != nil {
+					b.Fatal(err)
+				}
+			}
+			api.requests.Store(0)
+			for i := int64(0); b.Loop(); i++ {
+				if _, err := reader.ReadAt(buf, bench.offset(i)); err != nil {
 					b.Fatal(err)
 				}
 			}
