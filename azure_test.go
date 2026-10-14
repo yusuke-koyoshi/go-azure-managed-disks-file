@@ -252,26 +252,33 @@ func TestOpenSharedCacheIncludesBlobIdentity(t *testing.T) {
 }
 
 func TestOpenSkipsUnallocatedBlocks(t *testing.T) {
-	api := &testBlob{id: "sparse", data: []byte("abcdWXYZ"), ranges: []Range{{Start: 4, End: 7}}}
-	reader, err := OpenWithOptions(context.Background(), api, nil, OpenOptions{BlockSize: 4})
+	api := &testBlob{id: "sparse", data: []byte("abcdWXYZefgh"), ranges: []Range{{Start: 4, End: 7}}}
+	cache := &testCache{values: map[string][]byte{}}
+	reader, err := OpenWithOptions(context.Background(), api, cache, OpenOptions{BlockSize: 4, PrefetchBlocks: 2})
 	if err != nil {
 		t.Fatal(err)
 	}
-	buf := make([]byte, 4)
+	buf := bytes.Repeat([]byte("-"), 4)
 	if _, err := reader.ReadAt(buf, 0); err != nil {
 		t.Fatal(err)
 	}
 	if !bytes.Equal(buf, make([]byte, 4)) {
 		t.Fatalf("unallocated block = %q", buf)
 	}
-	if api.requests.Load() != 0 {
-		t.Fatalf("unallocated block made %d requests", api.requests.Load())
-	}
-	if _, err := reader.ReadAt(buf, 4); err != nil {
+	buf = bytes.Repeat([]byte("-"), 8)
+	if _, err := reader.ReadAt(buf, 2); err != nil {
 		t.Fatal(err)
 	}
-	if string(buf) != "WXYZ" {
-		t.Fatalf("allocated block = %q", buf)
+	if want := "\x00\x00WXYZ\x00\x00"; string(buf) != want {
+		t.Fatalf("read across blocks = %q, want %q", buf, want)
+	}
+	if got := api.requests.Load(); got != 1 {
+		t.Fatalf("made %d requests, want 1 for the allocated block", got)
+	}
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	if len(cache.values) != 1 {
+		t.Fatalf("cache holds %d blocks, want only the allocated one", len(cache.values))
 	}
 }
 

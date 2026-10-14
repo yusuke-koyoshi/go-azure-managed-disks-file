@@ -217,6 +217,12 @@ func (r *blobReader) readBlocks(p []byte, off, first, last int64) []error {
 	var missing []block
 	for i := range errs {
 		number := first + int64(i)
+		if r.blockUnallocated(number) {
+			// Zero-fill instead of caching zeros, which would evict data.
+			dst, _ := r.blockSpan(p, off, number)
+			clear(dst)
+			continue
+		}
 		key := r.blockKey(number)
 		if value, ok := r.cache.Get(key); ok {
 			errs[i] = r.copyBlock(p, off, number, value)
@@ -246,17 +252,27 @@ func (r *blobReader) fetchInto(p []byte, off, number int64, key string) error {
 	return r.copyBlock(p, off, number, value)
 }
 
-// copyBlock copies the part of block number that p, which holds the bytes
-// from off, covers.
 func (r *blobReader) copyBlock(p []byte, off, number int64, block []byte) error {
+	dst, from := r.blockSpan(p, off, number)
+	if int64(len(block)) < from+int64(len(dst)) {
+		return io.ErrUnexpectedEOF
+	}
+	copy(dst, block[from:])
+	return nil
+}
+
+// blockSpan returns the part of p, which holds the bytes from off, that block
+// number covers, and where that part starts within the block.
+func (r *blobReader) blockSpan(p []byte, off, number int64) ([]byte, int64) {
 	blockStart := number * r.blockSize
 	start := max(off, blockStart)
 	end := min(off+int64(len(p)), blockStart+r.blockSize)
-	if int64(len(block)) < end-blockStart {
-		return io.ErrUnexpectedEOF
-	}
-	copy(p[start-off:end-off], block[start-blockStart:end-blockStart])
-	return nil
+	return p[start-off : end-off], start - blockStart
+}
+
+func (r *blobReader) blockUnallocated(number int64) bool {
+	start := number * r.blockSize
+	return r.isUnallocated(start, start+r.blockSize-1)
 }
 
 func (r *blobReader) blockKey(number int64) string {
@@ -285,13 +301,6 @@ func (r *blobReader) fetchBlock(number int64, key string) ([]byte, error) {
 			return nil, err
 		}
 		start := number * r.blockSize
-		if r.isUnallocated(start, start+r.blockSize-1) {
-			value := make([]byte, r.blockSize)
-			if r.cache != nil {
-				r.cache.Add(key, value)
-			}
-			return value, nil
-		}
 		count := r.blockSize
 		if end := start + count; end > r.size() {
 			count = r.size() - start
@@ -336,6 +345,9 @@ func (r *blobReader) releaseBlock() {
 }
 
 func (r *blobReader) prefetch(number int64) {
+	if r.blockUnallocated(number) {
+		return
+	}
 	go func() {
 		key := r.blockKey(number)
 		if _, ok := r.cache.Get(key); ok {
