@@ -42,12 +42,13 @@ type Options struct {
 	// 4 MiB or less, which the default block size satisfies.
 	SkipRangeChecksum bool
 	// Open configures the reader, such as MaxConcurrentBlocks and
-	// PrefetchBlocks. The zero value is what Open uses.
+	// PrefetchBlocks. The zero value is what Open uses. A BlockSize above
+	// 4 MiB reads without range checksum validation.
 	Open azurediskfile.OpenOptions
-	// Retry replaces the Azure SDK retry policy for range reads, not for the
-	// grant and revocation. The zero value keeps the SDK defaults. This
-	// package retries 403 itself while a granted SAS propagates, so leave 403
-	// out of StatusCodes.
+	// Retry replaces the Azure SDK retry policy for the blob requests (size,
+	// page ranges and range reads), not for the grant and revocation. The
+	// zero value keeps the SDK defaults. This package retries 403 itself
+	// while a granted SAS propagates, so leave 403 out of StatusCodes.
 	Retry policy.RetryOptions
 }
 

@@ -411,7 +411,8 @@ func TestGrantAccessAndOpenPassesReadOptions(t *testing.T) {
 		},
 		{
 			// Documented against, but the SDK retrying 403 as well must not
-			// break the read.
+			// break the read. Finishing before sasActivationInterval shows that
+			// the SDK, not this package, retried it.
 			name:         "403 in StatusCodes",
 			failures:     []int{http.StatusForbidden},
 			retry:        policy.RetryOptions{RetryDelay: time.Millisecond, StatusCodes: []int{http.StatusForbidden}},
@@ -429,7 +430,11 @@ func TestGrantAccessAndOpenPassesReadOptions(t *testing.T) {
 				t.Fatal(err)
 			}
 			buf := make([]byte, len(data))
+			start := time.Now()
 			_, err = reader.ReadAt(buf, 0)
+			if elapsed := time.Since(start); elapsed >= sasActivationInterval {
+				t.Errorf("ReadAt took %v, want less than %v", elapsed, sasActivationInterval)
+			}
 			if test.wantStatus != 0 {
 				var responseErr *azcore.ResponseError
 				if !errors.As(err, &responseErr) || responseErr.StatusCode != test.wantStatus {

@@ -77,10 +77,11 @@ sr, cleanup, err := snapshot.GrantAccessAndOpenWithOptions(ctx, cred, resourceID
 })
 ```
 
-`Open` takes the same `OpenOptions` as `OpenWithOptions`, and `Retry`
-replaces the Azure SDK retry policy for range reads. Leave 403 out of
-`Retry.StatusCodes`: the package already retries it while a new SAS
-propagates.
+`Open` takes the same `OpenOptions` as `OpenWithOptions`; a `BlockSize` above
+4 MiB reads without range checksum validation. `Retry` replaces the Azure SDK
+retry policy for the blob requests, not for the grant and revocation. Leave
+403 out of `Retry.StatusCodes`: the package already retries it while a new
+SAS propagates.
 
 `Duration: 0` uses a 20-minute SAS. Both `GrantAccessAndOpen` and
 `GrantAccessAndOpenWithOptions` revoke the SAS during cleanup and validate
