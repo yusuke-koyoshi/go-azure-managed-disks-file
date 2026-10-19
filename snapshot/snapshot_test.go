@@ -17,6 +17,7 @@ import (
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
+	azurediskfile "github.com/yusuke-koyoshi/go-azure-managed-disks-file"
 )
 
 // fakeSnapshotClient records the SAS lifecycle calls in the order they happen.
@@ -326,6 +327,122 @@ func TestGrantAccessAndOpen(t *testing.T) {
 			})
 		}
 	})
+}
+
+// rangeRecorder serves blobHandler, fails the first range reads with the given
+// statuses, and records how many range reads arrive and overlap.
+type rangeRecorder struct {
+	next      http.Handler
+	failures  []int
+	delay     time.Duration
+	requests  atomic.Int64
+	active    atomic.Int64
+	maxActive atomic.Int64
+}
+
+func (r *rangeRecorder) ServeHTTP(w http.ResponseWriter, request *http.Request) {
+	if request.Method == http.MethodHead || request.URL.Query().Get("comp") == "pagelist" {
+		r.next.ServeHTTP(w, request)
+		return
+	}
+	n := r.requests.Add(1)
+	active := r.active.Add(1)
+	defer r.active.Add(-1)
+	for {
+		maxActive := r.maxActive.Load()
+		if active <= maxActive || r.maxActive.CompareAndSwap(maxActive, active) {
+			break
+		}
+	}
+	time.Sleep(r.delay)
+	if n <= int64(len(r.failures)) {
+		w.WriteHeader(r.failures[n-1])
+		return
+	}
+	r.next.ServeHTTP(w, request)
+}
+
+func TestGrantAccessAndOpenPassesReadOptions(t *testing.T) {
+	const durationSeconds = 1200
+	data := []byte("snapshot payload")
+
+	t.Run("reader options", func(t *testing.T) {
+		recorder := &rangeRecorder{next: blobHandler(data), delay: 10 * time.Millisecond}
+		client := newClientFor(t, recorder)
+		reader, _, err := grantAccessAndOpen(t.Context(), client, durationSeconds, nil, Options{
+			SkipRangeChecksum: true,
+			Open:              azurediskfile.OpenOptions{BlockSize: 4, MaxConcurrentBlocks: 1},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := reader.ReadAt(make([]byte, len(data)), 0); err != nil {
+			t.Fatalf("ReadAt: %v", err)
+		}
+		if got := recorder.requests.Load(); got != 4 {
+			t.Errorf("range reads = %d, want 4 blocks of 4 bytes", got)
+		}
+		if got := recorder.maxActive.Load(); got != 1 {
+			t.Errorf("concurrent range reads = %d, want 1", got)
+		}
+	})
+
+	for _, test := range []struct {
+		name         string
+		failures     []int
+		retry        policy.RetryOptions
+		wantRequests int64
+		wantStatus   int
+	}{
+		{
+			// The default policy would retry the 503, so a failure shows that
+			// these options replaced it.
+			name:         "retry options replace the default",
+			failures:     []int{http.StatusServiceUnavailable},
+			retry:        policy.RetryOptions{MaxRetries: -1},
+			wantRequests: 1,
+			wantStatus:   http.StatusServiceUnavailable,
+		},
+		{
+			name:         "retried 503",
+			failures:     []int{http.StatusServiceUnavailable, http.StatusServiceUnavailable},
+			retry:        policy.RetryOptions{RetryDelay: time.Millisecond},
+			wantRequests: 3,
+		},
+		{
+			// Documented against, but the SDK retrying 403 as well must not
+			// break the read.
+			name:         "403 in StatusCodes",
+			failures:     []int{http.StatusForbidden},
+			retry:        policy.RetryOptions{RetryDelay: time.Millisecond, StatusCodes: []int{http.StatusForbidden}},
+			wantRequests: 2,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			recorder := &rangeRecorder{next: blobHandler(data), failures: test.failures}
+			client := newClientFor(t, recorder)
+			reader, _, err := grantAccessAndOpen(t.Context(), client, durationSeconds, nil, Options{
+				SkipRangeChecksum: true,
+				Retry:             test.retry,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			buf := make([]byte, len(data))
+			_, err = reader.ReadAt(buf, 0)
+			if test.wantStatus != 0 {
+				var responseErr *azcore.ResponseError
+				if !errors.As(err, &responseErr) || responseErr.StatusCode != test.wantStatus {
+					t.Fatalf("ReadAt error = %v, want status %d", err, test.wantStatus)
+				}
+			} else if err != nil || string(buf) != string(data) {
+				t.Fatalf("ReadAt = %q, %v; want %q", buf, err, data)
+			}
+			if got := recorder.requests.Load(); got != test.wantRequests {
+				t.Errorf("range reads = %d, want %d", got, test.wantRequests)
+			}
+		})
+	}
 }
 
 func TestGrantAccessAndOpenWithOptions(t *testing.T) {

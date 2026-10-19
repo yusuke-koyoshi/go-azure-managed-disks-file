@@ -66,14 +66,21 @@ defer func() {
 }()
 ```
 
-Use `snapshot.GrantAccessAndOpenWithOptions` when the SAS duration or
-revocation behavior needs to be configured (with `time` imported):
+Use `snapshot.GrantAccessAndOpenWithOptions` when the SAS duration,
+revocation, reader or retry behavior needs to be configured (with `time` and
+`azurediskfile` imported):
 
 ```go
 sr, cleanup, err := snapshot.GrantAccessAndOpenWithOptions(ctx, cred, resourceID, cache, snapshot.Options{
     Duration: 45 * time.Minute,
+    Open:     azurediskfile.OpenOptions{MaxConcurrentBlocks: 8},
 })
 ```
+
+`Open` takes the same `OpenOptions` as `OpenWithOptions`, and `Retry`
+replaces the Azure SDK retry policy for range reads. Leave 403 out of
+`Retry.StatusCodes`: the package already retries it while a new SAS
+propagates.
 
 `Duration: 0` uses a 20-minute SAS. Both `GrantAccessAndOpen` and
 `GrantAccessAndOpenWithOptions` revoke the SAS during cleanup and validate

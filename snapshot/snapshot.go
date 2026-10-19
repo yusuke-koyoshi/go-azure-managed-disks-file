@@ -15,6 +15,7 @@ import (
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/arm"
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute"
 	azurediskfile "github.com/yusuke-koyoshi/go-azure-managed-disks-file"
 )
@@ -24,7 +25,7 @@ const (
 	snapshotResourceType  = "Microsoft.Compute/snapshots"
 )
 
-// Options configures snapshot SAS issuance and cleanup.
+// Options configures snapshot SAS issuance and cleanup, and the reader.
 //
 // A zero Duration uses the default 20-minute grant duration. By default,
 // GrantAccessAndOpenWithOptions revokes the SAS during cleanup and validates
@@ -40,6 +41,14 @@ type Options struct {
 	// support x-ms-range-get-content-md5. Validation only covers ranges of
 	// 4 MiB or less, which the default block size satisfies.
 	SkipRangeChecksum bool
+	// Open configures the reader, such as MaxConcurrentBlocks and
+	// PrefetchBlocks. The zero value is what Open uses.
+	Open azurediskfile.OpenOptions
+	// Retry replaces the Azure SDK retry policy for range reads, not for the
+	// grant and revocation. The zero value keeps the SDK defaults. This
+	// package retries 403 itself while a granted SAS propagates, so leave 403
+	// out of StatusCodes.
+	Retry policy.RetryOptions
 }
 
 // snapshotClient is the part of armcompute.SnapshotsClient this package uses.
@@ -71,7 +80,7 @@ func GrantAccessAndOpen(
 }
 
 // GrantAccessAndOpenWithOptions is GrantAccessAndOpen with configurable SAS
-// duration and revocation behavior.
+// duration, revocation, reader and retry behavior.
 func GrantAccessAndOpenWithOptions(
 	ctx context.Context,
 	cred azcore.TokenCredential,
@@ -151,7 +160,7 @@ func grantAccessAndOpen(
 		return nil, nil, errors.Join(errors.New("snapshot: GrantAccess returned no SAS URI"), revokeDetached(client))
 	}
 
-	var sasOptions []azurediskfile.SASOption
+	sasOptions := []azurediskfile.SASOption{azurediskfile.WithRetryOptions(options.Retry)}
 	if options.SkipRangeChecksum {
 		sasOptions = append(sasOptions, azurediskfile.WithoutRangeChecksum())
 	}
@@ -159,7 +168,7 @@ func grantAccessAndOpen(
 		api:      newSASBlobAPI(sas, sasOptions...),
 		activeBy: time.Now().Add(sasActivationTimeout),
 	}
-	reader, err := azurediskfile.Open(ctx, api, cache)
+	reader, err := azurediskfile.OpenWithOptions(ctx, api, cache, options.Open)
 	if err != nil {
 		return nil, nil, errors.Join(err, revokeDetached(client))
 	}
