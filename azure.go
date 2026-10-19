@@ -63,10 +63,10 @@ type OpenOptions struct {
 	BlockSize int64
 	// PrefetchBlocks fetches this many blocks ahead in the background while
 	// each read starts where the previous successful read ended; the first
-	// read counts. Each block is prefetched once per such run. It is disabled
-	// by default. Keep it small relative to the cache: a prefetched block
-	// holds a goroutine until it is fetched and may be evicted before it is
-	// read, and a run that stops early wastes up to this many requests.
+	// read counts. It is disabled by default. Keep it small relative to the
+	// cache: a prefetched block holds a goroutine until it is fetched and may
+	// be evicted before it is read, and a run that stops early wastes up to
+	// this many requests.
 	PrefetchBlocks int
 	// MaxConcurrentBlocks limits the number of blocks being fetched at once,
 	// prefetches included. Each fetched block is copied into the caller's
@@ -240,9 +240,6 @@ func (r *blobReader) prefetchAfter(off, end, last int64) {
 	}
 }
 
-// readBlocks copies the blocks first to last into p, which holds the bytes
-// from off, and returns the error of each block. Fetched blocks are copied as
-// soon as they arrive, so only the blocks in flight are held outside the cache.
 func (r *blobReader) readBlocks(p []byte, off, first, last int64) []error {
 	type block struct {
 		number int64
@@ -394,8 +391,7 @@ func (r *blobReader) isUnallocated(start, end int64) bool {
 		return false
 	}
 	// ranges is sorted and merged, so the first range ending at or after start
-	// is the only one that can overlap. Every read checks each of its blocks
-	// here, so a fragmented disk must not cost a linear scan.
+	// is the only one that can overlap.
 	i := sort.Search(len(r.ranges), func(i int) bool { return r.ranges[i].End >= start })
 	return i == len(r.ranges) || r.ranges[i].Start > end
 }

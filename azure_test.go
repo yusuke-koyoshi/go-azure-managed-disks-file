@@ -871,7 +871,7 @@ func TestSASBlobAPIReadRangeRetriesServerErrors(t *testing.T) {
 		wantErr      bool
 	}{
 		// Azure Storage answers 500 and 503 when a blob exceeds its
-		// scalability targets; the SDK's default policy retries them.
+		// scalability targets.
 		{status: http.StatusInternalServerError, wantRequests: 3},
 		{status: http.StatusServiceUnavailable, wantRequests: 3},
 		// The snapshot package retries 403 itself while a SAS propagates,
