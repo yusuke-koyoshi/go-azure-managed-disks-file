@@ -520,6 +520,39 @@ func TestPrefetchDoesNotFollowRandomAccess(t *testing.T) {
 	}
 }
 
+func TestPrefetchMarkFollowsSequentialRuns(t *testing.T) {
+	const blockSize = 8
+	api := &testBlob{id: "mark", data: make([]byte, 8*blockSize)}
+	sr, err := OpenWithOptions(context.Background(), api, nil, OpenOptions{BlockSize: blockSize, PrefetchBlocks: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	outer, _, _ := sr.Outer()
+	r := outer.(*blobReader)
+	for _, step := range []struct {
+		off      int64
+		wantMark int64
+	}{
+		{off: 0, wantMark: 2}, // the first read counts as sequential
+		{off: 1, wantMark: 2}, // within block 0: nothing new to prefetch
+		{off: 2, wantMark: 2},
+		{off: 47, wantMark: -1}, // not sequential: reset
+		{off: 48, wantMark: 7},  // block 7 only, clamped to the last block
+		{off: 8, wantMark: -1},
+		{off: 9, wantMark: 3}, // a run earlier in the blob still prefetches
+	} {
+		if _, err := r.ReadAt(make([]byte, 1), step.off); err != nil {
+			t.Fatalf("ReadAt(%d): %v", step.off, err)
+		}
+		r.readMu.Lock()
+		got := r.prefetchedUpTo
+		r.readMu.Unlock()
+		if got != step.wantMark {
+			t.Fatalf("after ReadAt(%d): prefetchedUpTo = %d, want %d", step.off, got, step.wantMark)
+		}
+	}
+}
+
 func BenchmarkReadAtPrefetch(b *testing.B) {
 	const blockSize = 1 << 10
 	data := bytes.Repeat([]byte("x"), 256*blockSize)

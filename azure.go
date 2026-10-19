@@ -123,6 +123,7 @@ func OpenWithOptions(ctx context.Context, api BlobAPI, cache Cache[string, []byt
 		maxConcurrent:  options.MaxConcurrentBlocks,
 		ranges:         ranges,
 		rangesKnown:    len(ranges) > 0,
+		prefetchedUpTo: -1,
 	}
 	if r.cache == nil {
 		r.cache = newMemoryCache(256)
@@ -151,6 +152,7 @@ type blobReader struct {
 	readMu         sync.Mutex
 	lastReadEnd    int64
 	hasRead        bool
+	prefetchedUpTo int64
 }
 
 func (r *blobReader) ReadAt(p []byte, off int64) (int, error) {
@@ -187,22 +189,45 @@ func (r *blobReader) ReadAt(p []byte, off int64) (int, error) {
 		return n, io.EOF
 	}
 
-	r.readMu.Lock()
-	sequential := !r.hasRead || off == r.lastReadEnd
-	r.lastReadEnd = off + int64(len(p))
-	r.hasRead = true
-	r.readMu.Unlock()
-	if sequential && r.prefetchBlocks > 0 {
-		next := last + 1
-		for i := 0; i < r.prefetchBlocks; i++ {
-			number := next + int64(i)
-			if number*r.blockSize >= r.sizeValue {
-				break
-			}
-			r.prefetch(number)
-		}
+	if r.prefetchBlocks > 0 {
+		r.prefetchAfter(off, end, last)
 	}
 	return n, nil
+}
+
+// prefetchAfter prefetches the blocks after last if the read [off, end)
+// starts where the previous successful read ended.
+func (r *blobReader) prefetchAfter(off, end, last int64) {
+	from := last + 1
+	// Clamp before adding so that a huge PrefetchBlocks does not overflow.
+	limit := (r.sizeValue - 1) / r.blockSize
+	if n := int64(r.prefetchBlocks); n < limit-last {
+		limit = last + n
+	}
+
+	r.readMu.Lock()
+	sequential := !r.hasRead || off == r.lastReadEnd
+	r.lastReadEnd = end
+	r.hasRead = true
+	// Small reads within a block would otherwise prefetch the same blocks
+	// again. A read that does not follow resets the mark, so a later run
+	// earlier in the blob still prefetches.
+	if !sequential {
+		r.prefetchedUpTo = -1
+	} else if r.prefetchedUpTo >= from {
+		from = r.prefetchedUpTo + 1
+	}
+	if sequential && from <= limit {
+		r.prefetchedUpTo = limit
+	}
+	r.readMu.Unlock()
+
+	if !sequential {
+		return
+	}
+	for number := from; number <= limit; number++ {
+		r.prefetch(number)
+	}
 }
 
 // readBlocks copies the blocks first to last into p, which holds the bytes
