@@ -393,15 +393,11 @@ func (r *blobReader) isUnallocated(start, end int64) bool {
 	if !r.rangesKnown {
 		return false
 	}
-	for _, allocated := range r.ranges {
-		if allocated.End >= start && allocated.Start <= end {
-			return false
-		}
-		if allocated.Start > end {
-			break
-		}
-	}
-	return true
+	// ranges is sorted and merged, so the first range ending at or after start
+	// is the only one that can overlap. Every read checks each of its blocks
+	// here, so a fragmented disk must not cost a linear scan.
+	i := sort.Search(len(r.ranges), func(i int) bool { return r.ranges[i].End >= start })
+	return i == len(r.ranges) || r.ranges[i].Start > end
 }
 
 func normalizeRanges(ranges []Range) []Range {

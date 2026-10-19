@@ -283,6 +283,35 @@ func TestOpenSkipsUnallocatedBlocks(t *testing.T) {
 	}
 }
 
+func TestIsUnallocatedWithSeveralRanges(t *testing.T) {
+	// Unsorted, with 20-29 and 30-39 adjacent, so they are merged into 20-39.
+	ranges := []Range{{Start: 60, End: 69}, {Start: 30, End: 39}, {Start: 10, End: 14}, {Start: 20, End: 29}}
+	sr, err := OpenWithOptions(context.Background(), &testBlob{id: "ranges", data: make([]byte, 100), ranges: ranges}, nil, OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	outer, _, _ := sr.Outer()
+	r := outer.(*blobReader)
+	for _, test := range []struct {
+		start, end int64
+		want       bool
+	}{
+		{0, 9, true},
+		{0, 10, false},
+		{14, 19, false},
+		{15, 19, true},
+		{25, 35, false},
+		{40, 59, true},
+		{59, 60, false},
+		{69, 69, false},
+		{70, 99, true},
+	} {
+		if got := r.isUnallocated(test.start, test.end); got != test.want {
+			t.Errorf("isUnallocated(%d, %d) = %v, want %v", test.start, test.end, got, test.want)
+		}
+	}
+}
+
 func TestOpenEmptyPageRangesDoesNotZeroReads(t *testing.T) {
 	api := &testBlob{id: "empty-ranges", data: []byte("data"), ranges: []Range{}}
 	reader, err := OpenWithOptions(context.Background(), api, nil, OpenOptions{BlockSize: 4})
