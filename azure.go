@@ -37,8 +37,9 @@ type Range struct {
 	End   int64
 }
 
-// Cache stores blocks. Implementations must be safe for concurrent use when a
-// reader is shared by multiple goroutines.
+// Cache stores blocks. Implementations must be safe for concurrent use even if
+// the reader is not shared, because a read of several blocks and read-ahead
+// call it from goroutines started by the reader.
 type Cache[K comparable, V any] interface {
 	Add(key K, value V) bool
 	Get(key K) (value V, ok bool)
@@ -60,12 +61,18 @@ type OpenOptions struct {
 	// BlockSize is the size of each cached range. A non-positive value uses
 	// DefaultBlockSize.
 	BlockSize int64
-	// PrefetchBlocks asynchronously fetches this many blocks after each read.
-	// It is disabled by default. Prefetching only follows reads that are
-	// sequential with the previous completed read.
+	// PrefetchBlocks fetches this many blocks ahead in the background while
+	// each read starts where the previous successful read ended; the first
+	// read counts. Each block is prefetched once per such run. It is disabled
+	// by default. Keep it small relative to the cache: a prefetched block
+	// holds a goroutine until it is fetched and may be evicted before it is
+	// read, and a run that stops early wastes up to this many requests.
 	PrefetchBlocks int
-	// MaxConcurrentBlocks limits the number of blocks being fetched at once.
-	// A non-positive value leaves block fetching unlimited.
+	// MaxConcurrentBlocks limits the number of blocks being fetched at once,
+	// prefetches included. Each fetched block is copied into the caller's
+	// buffer as soon as it arrives, so this also roughly limits the block
+	// memory a read uses outside the cache. A non-positive value leaves block
+	// fetching unlimited.
 	MaxConcurrentBlocks int
 }
 
@@ -76,6 +83,11 @@ type OpenOptions struct {
 // sparse-range skipping without preventing the reader from opening. If api
 // does not provide BlobIdentifier, the reader gets a unique identity and its
 // blocks are not shared with other readers through a shared cache.
+//
+// A panic in api or cache while a block is fetched ends the process when the
+// fetch runs in a goroutine started by the reader: in a read that fetches
+// several blocks, and in read-ahead. A read that fetches one block raises it
+// in the caller's goroutine.
 func Open(ctx context.Context, api BlobAPI, cache Cache[string, []byte]) (*io.SectionReader, error) {
 	return OpenWithOptions(ctx, api, cache, OpenOptions{})
 }
