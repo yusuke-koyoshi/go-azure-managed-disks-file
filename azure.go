@@ -207,8 +207,6 @@ func (r *blobReader) ReadAt(p []byte, off int64) (int, error) {
 	return n, nil
 }
 
-// prefetchAfter prefetches the blocks after last if the read [off, end)
-// starts where the previous successful read ended.
 func (r *blobReader) prefetchAfter(off, end, last int64) {
 	from := last + 1
 	// Clamp before adding so that a huge PrefetchBlocks does not overflow.
@@ -298,8 +296,7 @@ func (r *blobReader) copyBlock(p []byte, off, number int64, block []byte) error 
 	return nil
 }
 
-// blockSpan returns the part of p, which holds the bytes from off, that block
-// number covers, and where that part starts within the block.
+// The second result is where the span starts within the block.
 func (r *blobReader) blockSpan(p []byte, off, number int64) ([]byte, int64) {
 	blockStart := number * r.blockSize
 	start := max(off, blockStart)
@@ -325,10 +322,8 @@ func (r *blobReader) fetchBlock(number int64, key string) ([]byte, error) {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		if r.cache != nil {
-			if value, ok := r.cache.Get(key); ok {
-				return value, nil
-			}
+		if value, ok := r.cache.Get(key); ok {
+			return value, nil
 		}
 		if err := r.acquireBlock(ctx); err != nil {
 			return nil, err
@@ -352,9 +347,7 @@ func (r *blobReader) fetchBlock(number int64, key string) ([]byte, error) {
 		if int64(len(value)) != count {
 			return nil, fmt.Errorf("azurediskfile: range %d-%d returned %d bytes, want %d", start, start+count-1, len(value), count)
 		}
-		if r.cache != nil {
-			r.cache.Add(key, value)
-		}
+		r.cache.Add(key, value)
 		return value, nil
 	})
 	if err != nil {
@@ -658,7 +651,7 @@ func (a *sasBlobAPI) PageRanges(ctx context.Context) ([]Range, error) {
 	}
 	var ranges []Range
 	for start := int64(0); start < size; start += a.windowSize {
-		count := minInt64(a.windowSize, size-start)
+		count := min(a.windowSize, size-start)
 		pager := a.pageBlob.NewGetPageRangesPager(&pageblob.GetPageRangesOptions{
 			Range: azblob.HTTPRange{Offset: start, Count: count},
 		})
@@ -728,10 +721,3 @@ func (m *mockBlobAPI) ReadRange(ctx context.Context, off, count int64) ([]byte, 
 }
 
 func (m *mockBlobAPI) PageRanges(context.Context) ([]Range, error) { return nil, nil }
-
-func minInt64(a, b int64) int64 {
-	if a < b {
-		return a
-	}
-	return b
-}
