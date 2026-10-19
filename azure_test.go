@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
 )
 
@@ -828,6 +829,55 @@ func TestSASBlobAPIReadRangeContentMD5(t *testing.T) {
 			}
 			if md5Header != test.wantMD5 {
 				t.Fatalf("x-ms-range-get-content-md5 = %q, want %q", md5Header, test.wantMD5)
+			}
+		})
+	}
+}
+
+func TestSASBlobAPIReadRangeRetriesServerErrors(t *testing.T) {
+	data := []byte("azure export range payload")
+	for _, test := range []struct {
+		status       int
+		wantRequests int64
+		wantErr      bool
+	}{
+		// Azure Storage answers 500 and 503 when a blob exceeds its
+		// scalability targets; the SDK's default policy retries them.
+		{status: http.StatusInternalServerError, wantRequests: 3},
+		{status: http.StatusServiceUnavailable, wantRequests: 3},
+		// The snapshot package retries 403 itself while a SAS propagates,
+		// which relies on the SDK not retrying it as well.
+		{status: http.StatusForbidden, wantRequests: 1, wantErr: true},
+	} {
+		t.Run(http.StatusText(test.status), func(t *testing.T) {
+			var requests atomic.Int64
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				if requests.Add(1) <= 2 {
+					w.WriteHeader(test.status)
+					return
+				}
+				w.Header().Set("Content-MD5", base64.StdEncoding.EncodeToString(md5Sum(data)))
+				w.Header().Set("Content-Range", fmt.Sprintf("bytes 0-%d/%d", len(data)-1, len(data)))
+				w.WriteHeader(http.StatusPartialContent)
+				_, _ = w.Write(data)
+			}))
+			defer server.Close()
+
+			// Only the delay is shortened, so the default status codes are
+			// what is under test.
+			api := NewSASBlobAPI(server.URL+"/md-test/blob?sv=test&sig=test",
+				WithRetryOptions(policy.RetryOptions{RetryDelay: time.Millisecond}))
+			value, err := api.ReadRange(context.Background(), 0, int64(len(data)))
+			if test.wantErr {
+				var responseErr *azcore.ResponseError
+				if !errors.As(err, &responseErr) || responseErr.StatusCode != test.status {
+					t.Fatalf("ReadRange error = %v, want a ResponseError with status %d", err, test.status)
+				}
+			} else if err != nil || !bytes.Equal(value, data) {
+				t.Fatalf("ReadRange = %q, %v; want %q", value, err, data)
+			}
+			if got := requests.Load(); got != test.wantRequests {
+				t.Fatalf("server saw %d requests, want %d", got, test.wantRequests)
 			}
 		})
 	}
