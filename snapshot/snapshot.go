@@ -50,6 +50,12 @@ type Options struct {
 	// zero value keeps the SDK defaults. This package retries 403 itself
 	// while a granted SAS propagates, so leave 403 out of StatusCodes.
 	Retry policy.RetryOptions
+	// PerRetryPolicies run on every attempt of the blob requests and of the
+	// ARM requests that grant and revoke the SAS, retries included, unlike
+	// Retry, which covers only the blob requests. Revocation runs on a context
+	// of its own, so a policy can see its attempts after the reader and even
+	// the caller's context are done.
+	PerRetryPolicies []policy.Policy
 }
 
 // snapshotClient is the part of armcompute.SnapshotsClient this package uses.
@@ -103,7 +109,10 @@ func GrantAccessAndOpenWithOptions(
 	if err != nil {
 		return nil, nil, err
 	}
-	client, err := armcompute.NewSnapshotsClient(id.SubscriptionID, cred, nil)
+	clientOptions := &arm.ClientOptions{}
+	clientOptions.PerRetryPolicies = options.PerRetryPolicies
+	clientOptions.Transport = armTransport
+	client, err := armcompute.NewSnapshotsClient(id.SubscriptionID, cred, clientOptions)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -161,7 +170,10 @@ func grantAccessAndOpen(
 		return nil, nil, errors.Join(errors.New("snapshot: GrantAccess returned no SAS URI"), revokeDetached(client))
 	}
 
-	sasOptions := []azurediskfile.SASOption{azurediskfile.WithRetryOptions(options.Retry)}
+	sasOptions := []azurediskfile.SASOption{
+		azurediskfile.WithRetryOptions(options.Retry),
+		azurediskfile.WithPerRetryPolicies(options.PerRetryPolicies...),
+	}
 	if options.SkipRangeChecksum {
 		sasOptions = append(sasOptions, azurediskfile.WithoutRangeChecksum())
 	}

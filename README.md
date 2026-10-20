@@ -81,7 +81,9 @@ sr, cleanup, err := snapshot.GrantAccessAndOpenWithOptions(ctx, cred, resourceID
 4 MiB reads without range checksum validation. `Retry` replaces the Azure SDK
 retry policy for the blob requests, not for the grant and revocation. Leave
 403 out of `Retry.StatusCodes`: the package already retries it while a new
-SAS propagates.
+SAS propagates. `PerRetryPolicies` run on every attempt of the blob and ARM
+requests, including those the SDK retries, for example to count throttled
+responses that never reach the caller.
 
 `Duration: 0` uses a 20-minute SAS. Both `GrantAccessAndOpen` and
 `GrantAccessAndOpenWithOptions` revoke the SAS during cleanup and validate

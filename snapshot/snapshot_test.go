@@ -16,7 +16,11 @@ import (
 	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
+	azfake "github.com/Azure/azure-sdk-for-go/sdk/azcore/fake"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/runtime"
+	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute/v9"
+	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute/v9/fake"
 	azurediskfile "github.com/yusuke-koyoshi/go-azure-managed-disks-file"
 )
 
@@ -447,6 +451,104 @@ func TestGrantAccessAndOpenPassesReadOptions(t *testing.T) {
 				t.Errorf("range reads = %d, want %d", got, test.wantRequests)
 			}
 		})
+	}
+}
+
+// attemptRecorder is a per-retry policy that records each attempt it sees as
+// "method last-path-segment status api-name".
+type attemptRecorder struct {
+	mu       sync.Mutex
+	attempts []string
+}
+
+func (r *attemptRecorder) Do(req *policy.Request) (*http.Response, error) {
+	resp, err := req.Next()
+	path := req.Raw().URL.Path
+	segment := path[strings.LastIndex(path, "/")+1:]
+	if req.Raw().URL.Query().Get("comp") == "pagelist" {
+		segment = "pagelist"
+	}
+	status := "error"
+	if resp != nil {
+		status = strconv.Itoa(resp.StatusCode)
+	}
+	apiName, _ := req.Raw().Context().Value(runtime.CtxAPINameKey{}).(string)
+	r.mu.Lock()
+	r.attempts = append(r.attempts, strings.TrimSpace(strings.Join([]string{req.Raw().Method, segment, status, apiName}, " ")))
+	r.mu.Unlock()
+	return resp, err
+}
+
+func (r *attemptRecorder) recorded() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.attempts...)
+}
+
+// throttleFirst answers the first request with 429 and passes the rest to
+// next. Errors from the fake servers are never retried, so the 429 the SDK
+// retries has to come from here.
+type throttleFirst struct {
+	next policy.Transporter
+	sent atomic.Bool
+}
+
+func (t *throttleFirst) Do(req *http.Request) (*http.Response, error) {
+	if t.sent.CompareAndSwap(false, true) {
+		return &http.Response{StatusCode: http.StatusTooManyRequests, Header: http.Header{}, Body: http.NoBody, Request: req}, nil
+	}
+	return t.next.Do(req)
+}
+
+func TestGrantAccessAndOpenWithOptionsPerRetryPolicies(t *testing.T) {
+	data := []byte("snapshot payload")
+	sas := newBlobServer(t, data).URL + "/md-test/blob?sv=test&sig=test"
+	server := &fake.SnapshotsServer{
+		BeginGrantAccess: func(context.Context, string, string, armcompute.GrantAccessData, *armcompute.SnapshotsClientBeginGrantAccessOptions) (resp azfake.PollerResponder[armcompute.SnapshotsClientGrantAccessResponse], errResp azfake.ErrorResponder) {
+			resp.AddNonTerminalResponse(http.StatusAccepted, nil)
+			resp.SetTerminalResponse(http.StatusOK, armcompute.SnapshotsClientGrantAccessResponse{
+				AccessURI: armcompute.AccessURI{AccessSAS: &sas},
+			}, nil)
+			return
+		},
+		BeginRevokeAccess: func(context.Context, string, string, *armcompute.SnapshotsClientBeginRevokeAccessOptions) (resp azfake.PollerResponder[armcompute.SnapshotsClientRevokeAccessResponse], errResp azfake.ErrorResponder) {
+			resp.SetTerminalResponse(http.StatusOK, armcompute.SnapshotsClientRevokeAccessResponse{}, nil)
+			return
+		},
+	}
+	original := armTransport
+	armTransport = &throttleFirst{next: fake.NewSnapshotsServerTransport(server)}
+	t.Cleanup(func() { armTransport = original })
+
+	recorder := &attemptRecorder{}
+	reader, cleanup, err := GrantAccessAndOpenWithOptions(t.Context(), &azfake.TokenCredential{},
+		"/subscriptions/sub/resourceGroups/rg/providers/Microsoft.Compute/snapshots/snap", nil, Options{
+			SkipRangeChecksum: true,
+			PerRetryPolicies:  []policy.Policy{recorder},
+		})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reader.ReadAt(make([]byte, len(data)), 0); err != nil {
+		t.Fatalf("ReadAt: %v", err)
+	}
+	if err := cleanup(); err != nil {
+		t.Fatalf("cleanup: %v", err)
+	}
+	// The retried 429 and the polling of the grant reach the policy. The
+	// polling GET carries the API name only because the fake poller sets it;
+	// the real pollers poll on the caller's context, which has none.
+	want := []string{
+		"POST beginGetAccess 429 SnapshotsClient.BeginGrantAccess",
+		"POST beginGetAccess 202 SnapshotsClient.BeginGrantAccess",
+		"GET status 200 SnapshotsClient.BeginGrantAccess",
+		"HEAD blob 200",
+		"GET pagelist 200",
+		"GET blob 206",
+		"POST endGetAccess 200 SnapshotsClient.BeginRevokeAccess",
+	}
+	if got := recorder.recorded(); !slices.Equal(got, want) {
+		t.Errorf("policy saw\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
 	}
 }
 
