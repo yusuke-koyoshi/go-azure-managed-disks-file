@@ -34,10 +34,14 @@ const (
 type Options struct {
 	// Duration is the SAS lifetime. Zero uses the 20-minute default.
 	Duration time.Duration
-	// SkipRevokeOnCleanup skips revoking the granted SAS during cleanup when true.
+	// SkipRevokeOnCleanup skips revoking the granted SAS during cleanup when
+	// true. While the SAS left behind is active, later opens of the snapshot
+	// return ErrSnapshotInUse unless they set SkipActiveSASCheck.
 	SkipRevokeOnCleanup bool
 	// SkipActiveSASCheck grants access even when the snapshot already has an
 	// active SAS, replacing it. Set it only when no other reader can exist.
+	// It also drops the need for the Microsoft.Compute/snapshots/read
+	// permission, which granting and revoking do not otherwise use.
 	SkipActiveSASCheck bool
 	// SkipRangeChecksum disables per-range MD5 validation when true. Validation
 	// fails closed, so this is the fallback for export endpoints that do not
@@ -54,11 +58,12 @@ type Options struct {
 	// while a granted SAS propagates, so leave 403 out of StatusCodes.
 	Retry policy.RetryOptions
 	// PerRetryPolicies run on every attempt of the blob requests and of the
-	// ARM requests that grant and revoke the SAS, retries included, unlike
-	// Retry, which covers only the blob requests. Revocation runs on a context
-	// of its own, so a policy can see its attempts after the reader and even
-	// the caller's context are done. The policies serve concurrent requests,
-	// so they must be safe for concurrent use.
+	// ARM requests that read the snapshot state and grant and revoke the SAS,
+	// retries included, unlike Retry, which covers only the blob requests.
+	// Revocation runs on a context of its own, so a policy can see its
+	// attempts after the reader and even the caller's context are done. The
+	// policies serve concurrent requests, so they must be safe for concurrent
+	// use.
 	PerRetryPolicies []policy.Policy
 	// Transport replaces the HTTP transport of both the ARM and the blob
 	// clients, for example for tests or a proxy, so a fake has to serve or
@@ -89,10 +94,12 @@ type snapshotClient interface {
 // already active on the snapshot, so a snapshot supports one reader at a
 // time: when the snapshot already has an active SAS or upload, it returns
 // ErrSnapshotInUse without granting. Two callers that check before either
-// grants can still both grant. A replaced or revoked SAS keeps working for
-// about 30 seconds. The cleanup
-// function revokes the SAS and reports a failed revocation; calling it again
-// retries a failed revocation and does nothing after a successful one.
+// grants can still both grant. The check reads the snapshot, so the credential
+// needs Microsoft.Compute/snapshots/read in addition to the beginGetAccess and
+// endGetAccess actions. A replaced or revoked SAS keeps working for about 30
+// seconds. The cleanup function revokes the SAS and reports a failed
+// revocation; calling it again retries a failed revocation and does nothing
+// after a successful one.
 //
 // The credential is intentionally explicit. This function does not construct
 // DefaultAzureCredential and therefore cannot silently use an unintended

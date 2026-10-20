@@ -614,17 +614,18 @@ func TestUniqueID(t *testing.T) {
 	}
 }
 
-// throttleFirst answers the first request with 429 and passes the rest to
-// next. Errors from the fake servers are never retried, so the 429 the SDK
+// throttleFirst answers the first request of each HTTP method with 429 and
+// passes the rest to next, so both the first GET and the first POST are
+// retried. Errors from the fake servers are never retried, so the 429 the SDK
 // retries has to come from here. Retry-After-Ms keeps the SDK from waiting its
 // default backoff before the retry.
 type throttleFirst struct {
 	next policy.Transporter
-	sent atomic.Bool
+	sent sync.Map
 }
 
 func (t *throttleFirst) Do(req *http.Request) (*http.Response, error) {
-	if t.sent.CompareAndSwap(false, true) {
+	if _, loaded := t.sent.LoadOrStore(req.Method, true); !loaded {
 		header := http.Header{"Retry-After-Ms": []string{"1"}}
 		return &http.Response{StatusCode: http.StatusTooManyRequests, Header: header, Body: http.NoBody, Request: req}, nil
 	}
@@ -692,13 +693,14 @@ func TestGrantAccessAndOpenWithOptionsPerRetryPolicies(t *testing.T) {
 	if err := cleanup(); err != nil {
 		t.Fatalf("cleanup: %v", err)
 	}
-	// The retried 429 of the state check and the polling of the grant reach
-	// the policy. The polling GET carries the API name only because the fake
-	// poller sets it; the real pollers poll on the caller's context, which has
-	// none.
+	// The retried 429s of the state check and of the grant, and the polling of
+	// the grant reach the policy. The polling GET carries the API name only
+	// because the fake poller sets it; the real pollers poll on the caller's
+	// context, which has none.
 	want := []string{
 		"GET snap 429 SnapshotsClient.Get",
 		"GET snap 200 SnapshotsClient.Get",
+		"POST beginGetAccess 429 SnapshotsClient.BeginGrantAccess",
 		"POST beginGetAccess 202 SnapshotsClient.BeginGrantAccess",
 		"GET status 200 SnapshotsClient.BeginGrantAccess",
 		"HEAD blob 200",

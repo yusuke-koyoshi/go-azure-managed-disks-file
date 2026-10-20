@@ -92,9 +92,11 @@ when a snapshot is deleted and recreated under the same name, so key results
 cached for a snapshot by its `uniqueId` rather than by the resource ID alone.
 
 `Duration: 0` uses a 20-minute SAS. Both `GrantAccessAndOpen` and
-`GrantAccessAndOpenWithOptions` revoke the SAS during cleanup and validate
-range checksums by default. Set `SkipRevokeOnCleanup` or `SkipRangeChecksum`
-only to explicitly opt out.
+`GrantAccessAndOpenWithOptions` refuse a snapshot that already has an active
+SAS, revoke the SAS during cleanup and validate range checksums by default.
+Set `SkipActiveSASCheck`, `SkipRevokeOnCleanup` or `SkipRangeChecksum` only to
+explicitly opt out. While a SAS left behind by `SkipRevokeOnCleanup` is
+active, later opens of the snapshot return `ErrSnapshotInUse`.
 
 A snapshot supports one reader at a time. Granting access replaces any SAS
 already active on the snapshot, and the replaced SAS stops working. So by
@@ -104,7 +106,10 @@ snapshot already has an active SAS or upload. Two readers that check before
 either grants can still both grant, and the later grant cuts off the earlier
 reader, so give each reader its own snapshot. A SAS left behind by a crashed
 process keeps the snapshot refused until it is revoked
-(`az snapshot revoke-access`) or replaced with `SkipActiveSASCheck`.
+(`az snapshot revoke-access`) or replaced with `SkipActiveSASCheck`. The check
+reads the snapshot, so the credential needs `Microsoft.Compute/snapshots/read`
+in addition to `Microsoft.Compute/snapshots/beginGetAccess/action` and
+`Microsoft.Compute/snapshots/endGetAccess/action`.
 
 SAS changes take up to about 30 seconds to reach Azure Storage, and they reach
 its front ends one at a time, so a new SAS can be rejected with 403 even after
