@@ -504,7 +504,8 @@ func WithRetryOptions(options policy.RetryOptions) SASOption {
 // WithPerRetryPolicies adds policies that run on every attempt of the blob
 // requests, retries included, for example to count throttled responses that
 // the SDK retries and the caller never sees. Each use adds to the policies of
-// earlier uses.
+// earlier uses. The policies serve concurrent requests, so they must be safe
+// for concurrent use.
 func WithPerRetryPolicies(policies ...policy.Policy) SASOption {
 	return func(config *sasBlobOptions) { config.perRetry = append(config.perRetry, policies...) }
 }

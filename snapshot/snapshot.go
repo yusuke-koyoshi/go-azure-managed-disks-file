@@ -54,7 +54,8 @@ type Options struct {
 	// ARM requests that grant and revoke the SAS, retries included, unlike
 	// Retry, which covers only the blob requests. Revocation runs on a context
 	// of its own, so a policy can see its attempts after the reader and even
-	// the caller's context are done.
+	// the caller's context are done. The policies serve concurrent requests,
+	// so they must be safe for concurrent use.
 	PerRetryPolicies []policy.Policy
 }
 
@@ -111,9 +112,11 @@ func GrantAccessAndOpenWithOptions(
 
 // UniqueID returns the uniqueId of the snapshot. Unlike the resource ID, it
 // changes when a snapshot is deleted and recreated under the same name, so it
-// can key results cached for the snapshot. Only options.PerRetryPolicies is
-// used; it takes Options so that callers can pass the value they pass to
-// GrantAccessAndOpenWithOptions.
+// can key results cached for the snapshot. The snapshot can be recreated
+// between this call and a later grant, so a caller that keys a cache by the
+// result can call it again afterwards and compare. Only
+// options.PerRetryPolicies is used; it takes Options so that callers can pass
+// the value they pass to GrantAccessAndOpenWithOptions.
 func UniqueID(ctx context.Context, cred azcore.TokenCredential, resourceID string, options Options) (string, error) {
 	if ctx == nil {
 		ctx = context.Background()

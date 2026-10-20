@@ -566,7 +566,8 @@ func TestUniqueID(t *testing.T) {
 
 // throttleFirst answers the first request with 429 and passes the rest to
 // next. Errors from the fake servers are never retried, so the 429 the SDK
-// retries has to come from here.
+// retries has to come from here. Retry-After-Ms keeps the SDK from waiting its
+// default backoff before the retry.
 type throttleFirst struct {
 	next policy.Transporter
 	sent atomic.Bool
@@ -574,7 +575,8 @@ type throttleFirst struct {
 
 func (t *throttleFirst) Do(req *http.Request) (*http.Response, error) {
 	if t.sent.CompareAndSwap(false, true) {
-		return &http.Response{StatusCode: http.StatusTooManyRequests, Header: http.Header{}, Body: http.NoBody, Request: req}, nil
+		header := http.Header{"Retry-After-Ms": []string{"1"}}
+		return &http.Response{StatusCode: http.StatusTooManyRequests, Header: header, Body: http.NoBody, Request: req}, nil
 	}
 	return t.next.Do(req)
 }
