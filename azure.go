@@ -514,7 +514,8 @@ func WithPerRetryPolicies(policies ...policy.Policy) SASOption {
 
 // WithTransport replaces the HTTP transport of the blob clients, for example
 // for tests or a proxy. The retry and per-retry policies still run in front
-// of it. Nil keeps the SDK default.
+// of it. Nil keeps the SDK default. The SAS is redacted only from a
+// *url.Error, so the transport must not put the request URL into other errors.
 func WithTransport(transport policy.Transporter) SASOption {
 	return func(config *sasBlobOptions) { config.transport = transport }
 }

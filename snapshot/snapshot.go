@@ -60,7 +60,9 @@ type Options struct {
 	// Transport replaces the HTTP transport of both the ARM and the blob
 	// clients, for example for tests or a proxy, so a fake has to serve or
 	// route both hosts. The retry and per-retry policies still run in front of
-	// it. Nil keeps the SDK default.
+	// it. Nil keeps the SDK default. The SAS is redacted only from a
+	// *url.Error, so the transport must not put the request URL into other
+	// errors.
 	Transport policy.Transporter
 }
 

@@ -1064,6 +1064,10 @@ func TestSASBlobAPIRedactsSASFromTryTimeout(t *testing.T) {
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("ReadRange error = %v, want the try to time out", err)
 	}
+	var urlErr *url.Error
+	if !errors.As(err, &urlErr) || !strings.Contains(urlErr.URL, "sig=REDACTED") {
+		t.Fatalf("ReadRange error = %v, want a *url.Error with the query redacted", err)
+	}
 	if strings.Contains(err.Error(), "SECRET") {
 		t.Fatalf("error exposes the SAS signature: %v", err)
 	}
