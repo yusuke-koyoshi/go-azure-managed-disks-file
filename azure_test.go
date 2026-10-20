@@ -1052,6 +1052,23 @@ func TestSASBlobAPIRedactsSASFromTransportErrors(t *testing.T) {
 	}
 }
 
+func TestSASBlobAPIRedactsSASFromTryTimeout(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, request *http.Request) {
+		<-request.Context().Done()
+	}))
+	defer server.Close()
+
+	api := NewSASBlobAPI(server.URL+"/md-test/blob?sv=test&sig=SECRET",
+		WithRetryOptions(policy.RetryOptions{MaxRetries: -1, TryTimeout: 10 * time.Millisecond}))
+	_, err := api.ReadRange(context.Background(), 0, 512)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("ReadRange error = %v, want the try to time out", err)
+	}
+	if strings.Contains(err.Error(), "SECRET") {
+		t.Fatalf("error exposes the SAS signature: %v", err)
+	}
+}
+
 func md5Sum(value []byte) []byte {
 	sum := md5.Sum(value)
 	return sum[:]
