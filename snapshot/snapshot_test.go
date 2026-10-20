@@ -27,12 +27,21 @@ import (
 // fakeSnapshotClient records the SAS lifecycle calls in the order they happen.
 type fakeSnapshotClient struct {
 	mu             sync.Mutex
+	state          string
+	stateErr       error
 	sas            string
 	grantErr       error
 	revokeFailures int
 	revokeErr      error
 	calls          []string
 	durations      []int32
+}
+
+func (c *fakeSnapshotClient) State(context.Context) (string, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.calls = append(c.calls, "state")
+	return c.state, c.stateErr
 }
 
 func (c *fakeSnapshotClient) GrantReadAccess(_ context.Context, durationSeconds int32) (string, error) {
@@ -148,14 +157,59 @@ func TestGrantAccessAndOpen(t *testing.T) {
 		}
 	})
 
-	t.Run("grants without revoking first", func(t *testing.T) {
+	t.Run("checks the state and grants without revoking first", func(t *testing.T) {
+		// "" is a snapshot without a diskState, which is granted as well.
+		for _, state := range []string{string(armcompute.DiskStateUnattached), ""} {
+			client := newFakeClient(t, data)
+			client.state = state
+			if _, _, err := grantAccessAndOpen(t.Context(), client, durationSeconds, nil, Options{}); err != nil {
+				t.Fatalf("diskState %q: %v", state, err)
+			}
+			want := []string{"state", "grant"}
+			if got := client.recorded(); !slices.Equal(got, want) {
+				t.Errorf("diskState %q: calls = %v, want %v", state, got, want)
+			}
+		}
+	})
+
+	// Revoking here would withdraw the SAS of the reader the check protects.
+	t.Run("refuses a snapshot in use without granting or revoking", func(t *testing.T) {
+		for _, state := range []armcompute.DiskState{
+			armcompute.DiskStateActiveSAS, armcompute.DiskStateActiveSASFrozen,
+			armcompute.DiskStateActiveUpload, armcompute.DiskStateReadyToUpload,
+		} {
+			client := newFakeClient(t, data)
+			client.state = string(state)
+			_, _, err := grantAccessAndOpen(t.Context(), client, durationSeconds, nil, Options{})
+			if !errors.Is(err, ErrSnapshotInUse) || !strings.Contains(err.Error(), string(state)) {
+				t.Errorf("diskState %s: error = %v, want ErrSnapshotInUse naming the state", state, err)
+			}
+			if got := client.recorded(); !slices.Equal(got, []string{"state"}) {
+				t.Errorf("diskState %s: calls = %v, want only the state check", state, got)
+			}
+		}
+	})
+
+	t.Run("neither grants nor revokes when the state cannot be read", func(t *testing.T) {
+		stateErr := &azcore.ResponseError{StatusCode: http.StatusNotFound}
+		client := &fakeSnapshotClient{stateErr: stateErr}
+		_, _, err := grantAccessAndOpen(t.Context(), client, durationSeconds, nil, Options{})
+		if !errors.Is(err, stateErr) {
+			t.Fatalf("error = %v, want the state error", err)
+		}
+		if got := client.recorded(); !slices.Equal(got, []string{"state"}) {
+			t.Errorf("calls = %v, want only the state check", got)
+		}
+	})
+
+	t.Run("replaces an active SAS when the check is skipped", func(t *testing.T) {
 		client := newFakeClient(t, data)
-		if _, _, err := grantAccessAndOpen(t.Context(), client, durationSeconds, nil, Options{}); err != nil {
+		client.state = string(armcompute.DiskStateActiveSAS)
+		if _, _, err := grantAccessAndOpen(t.Context(), client, durationSeconds, nil, Options{SkipActiveSASCheck: true}); err != nil {
 			t.Fatal(err)
 		}
-		want := []string{"grant"}
-		if got := client.recorded(); !slices.Equal(got, want) {
-			t.Errorf("calls = %v, want %v", got, want)
+		if got := client.recorded(); !slices.Equal(got, []string{"grant"}) {
+			t.Errorf("calls = %v, want only the grant", got)
 		}
 	})
 
@@ -598,6 +652,13 @@ func TestGrantAccessAndOpenWithOptionsPerRetryPolicies(t *testing.T) {
 	blobServer := newBlobServer(t, data)
 	sas := blobServer.URL + "/md-test/blob?sv=test&sig=test"
 	server := &fake.SnapshotsServer{
+		Get: func(context.Context, string, string, *armcompute.SnapshotsClientGetOptions) (resp azfake.Responder[armcompute.SnapshotsClientGetResponse], errResp azfake.ErrorResponder) {
+			state := armcompute.DiskStateUnattached
+			resp.SetResponse(http.StatusOK, armcompute.SnapshotsClientGetResponse{
+				Snapshot: armcompute.Snapshot{Properties: &armcompute.SnapshotProperties{DiskState: &state}},
+			}, nil)
+			return
+		},
 		BeginGrantAccess: func(context.Context, string, string, armcompute.GrantAccessData, *armcompute.SnapshotsClientBeginGrantAccessOptions) (resp azfake.PollerResponder[armcompute.SnapshotsClientGrantAccessResponse], errResp azfake.ErrorResponder) {
 			resp.AddNonTerminalResponse(http.StatusAccepted, nil)
 			resp.SetTerminalResponse(http.StatusOK, armcompute.SnapshotsClientGrantAccessResponse{
@@ -631,11 +692,13 @@ func TestGrantAccessAndOpenWithOptionsPerRetryPolicies(t *testing.T) {
 	if err := cleanup(); err != nil {
 		t.Fatalf("cleanup: %v", err)
 	}
-	// The retried 429 and the polling of the grant reach the policy. The
-	// polling GET carries the API name only because the fake poller sets it;
-	// the real pollers poll on the caller's context, which has none.
+	// The retried 429 of the state check and the polling of the grant reach
+	// the policy. The polling GET carries the API name only because the fake
+	// poller sets it; the real pollers poll on the caller's context, which has
+	// none.
 	want := []string{
-		"POST beginGetAccess 429 SnapshotsClient.BeginGrantAccess",
+		"GET snap 429 SnapshotsClient.Get",
+		"GET snap 200 SnapshotsClient.Get",
 		"POST beginGetAccess 202 SnapshotsClient.BeginGrantAccess",
 		"GET status 200 SnapshotsClient.BeginGrantAccess",
 		"HEAD blob 200",

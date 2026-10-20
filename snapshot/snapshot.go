@@ -28,14 +28,17 @@ const (
 // Options configures snapshot SAS issuance and cleanup, and the reader.
 //
 // A zero Duration uses the default 20-minute grant duration. By default,
-// GrantAccessAndOpenWithOptions revokes the SAS during cleanup and validates
-// range checksums. Set the Skip fields only when deliberately opting out of
-// those safety behaviors.
+// GrantAccessAndOpenWithOptions refuses a snapshot that already has an active
+// SAS, revokes the SAS during cleanup and validates range checksums. Set the
+// Skip fields only when deliberately opting out of those safety behaviors.
 type Options struct {
 	// Duration is the SAS lifetime. Zero uses the 20-minute default.
 	Duration time.Duration
 	// SkipRevokeOnCleanup skips revoking the granted SAS during cleanup when true.
 	SkipRevokeOnCleanup bool
+	// SkipActiveSASCheck grants access even when the snapshot already has an
+	// active SAS, replacing it. Set it only when no other reader can exist.
+	SkipActiveSASCheck bool
 	// SkipRangeChecksum disables per-range MD5 validation when true. Validation
 	// fails closed, so this is the fallback for export endpoints that do not
 	// support x-ms-range-get-content-md5. Validation only covers ranges of
@@ -66,19 +69,28 @@ type Options struct {
 	Transport policy.Transporter
 }
 
+// ErrSnapshotInUse is returned when the snapshot already has an active SAS or
+// upload, which a grant would replace.
+var ErrSnapshotInUse = errors.New("snapshot: the snapshot already has an active SAS or upload")
+
 // snapshotClient is the part of armcompute.SnapshotsClient this package uses.
 // It covers the SAS lifecycle, which is the security-relevant behavior here,
 // and lets that lifecycle be exercised without ARM.
 type snapshotClient interface {
+	// State returns the snapshot's diskState, or "" when ARM returns none.
+	State(ctx context.Context) (string, error)
 	GrantReadAccess(ctx context.Context, durationSeconds int32) (string, error)
 	RevokeAccess(ctx context.Context) error
 }
 
 // GrantAccessAndOpen grants a read SAS for 20 minutes and opens the snapshot
 // through the root package. For 60 seconds after the grant, every request
-// retries 403 while the new SAS propagates. Granting replaces any SAS already
-// active on the snapshot, so a snapshot supports one reader at a time. A
-// replaced or revoked SAS keeps working for about 30 seconds. The cleanup
+// retries 403 while the new SAS propagates. Granting would replace any SAS
+// already active on the snapshot, so a snapshot supports one reader at a
+// time: when the snapshot already has an active SAS or upload, it returns
+// ErrSnapshotInUse without granting. Two callers that check before either
+// grants can still both grant. A replaced or revoked SAS keeps working for
+// about 30 seconds. The cleanup
 // function revokes the SAS and reports a failed revocation; calling it again
 // retries a failed revocation and does nothing after a successful one.
 //
@@ -202,6 +214,19 @@ func grantAccessAndOpen(
 	cache azurediskfile.Cache[string, []byte],
 	options Options,
 ) (*io.SectionReader, func() error, error) {
+	// Return without revoking: a revocation would withdraw the other SAS too.
+	if !options.SkipActiveSASCheck {
+		state, err := client.State(ctx)
+		if err != nil {
+			return nil, nil, fmt.Errorf("snapshot: read the snapshot state: %w", err)
+		}
+		switch armcompute.DiskState(state) {
+		case armcompute.DiskStateActiveSAS, armcompute.DiskStateActiveSASFrozen,
+			armcompute.DiskStateActiveUpload, armcompute.DiskStateReadyToUpload:
+			return nil, nil, fmt.Errorf("%w (diskState %s)", ErrSnapshotInUse, state)
+		}
+	}
+
 	sas, err := client.GrantReadAccess(ctx, durationSeconds)
 	if err != nil {
 		// The grant can fail while polling after ARM has already issued the SAS.
@@ -268,6 +293,17 @@ type armSnapshotClient struct {
 	client        *armcompute.SnapshotsClient
 	resourceGroup string
 	name          string
+}
+
+func (c *armSnapshotClient) State(ctx context.Context) (string, error) {
+	resp, err := c.client.Get(ctx, c.resourceGroup, c.name, nil)
+	if err != nil {
+		return "", err
+	}
+	if resp.Properties == nil || resp.Properties.DiskState == nil {
+		return "", nil
+	}
+	return string(*resp.Properties.DiskState), nil
 }
 
 func (c *armSnapshotClient) GrantReadAccess(ctx context.Context, durationSeconds int32) (string, error) {

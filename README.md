@@ -97,9 +97,14 @@ range checksums by default. Set `SkipRevokeOnCleanup` or `SkipRangeChecksum`
 only to explicitly opt out.
 
 A snapshot supports one reader at a time. Granting access replaces any SAS
-already active on the snapshot, and the replaced SAS stops working, so a
-concurrent reader of the same snapshot fails with 403. Give each reader its own
-snapshot.
+already active on the snapshot, and the replaced SAS stops working. So by
+default the `snapshot` package reads the snapshot's `diskState` right before
+granting, and returns `ErrSnapshotInUse` without granting or revoking when the
+snapshot already has an active SAS or upload. Two readers that check before
+either grants can still both grant, and the later grant cuts off the earlier
+reader, so give each reader its own snapshot. A SAS left behind by a crashed
+process keeps the snapshot refused until it is revoked
+(`az snapshot revoke-access`) or replaced with `SkipActiveSASCheck`.
 
 SAS changes take up to about 30 seconds to reach Azure Storage, and they reach
 its front ends one at a time, so a new SAS can be rejected with 403 even after

@@ -95,13 +95,30 @@ func TestIntegrationGrantReplacesActiveSAS(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = cleanupFirst() })
 
-	_, cleanupSecond, err := GrantAccessAndOpen(t.Context(), cred, resourceID, noCache{})
+	_, cleanupSecond, err := GrantAccessAndOpenWithOptions(t.Context(), cred, resourceID, noCache{},
+		Options{SkipActiveSASCheck: true})
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = cleanupSecond() })
 
 	waitForForbidden(t, first)
+}
+
+func TestIntegrationRefusesSnapshotInUse(t *testing.T) {
+	cred, resourceID := integrationTarget(t)
+	first, cleanup, err := GrantAccessAndOpen(t.Context(), cred, resourceID, noCache{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cleanup() })
+
+	if _, _, err := GrantAccessAndOpen(t.Context(), cred, resourceID, noCache{}); !errors.Is(err, ErrSnapshotInUse) {
+		t.Fatalf("second open error = %v, want ErrSnapshotInUse", err)
+	}
+	if _, err := first.ReadAt(make([]byte, 8), 512); err != nil {
+		t.Fatalf("first reader after the refused open: %v", err)
+	}
 }
 
 func TestIntegrationRevokeMissingSnapshot(t *testing.T) {
@@ -124,6 +141,29 @@ func TestIntegrationRevokeMissingSnapshot(t *testing.T) {
 	}
 	if err := revokeDetached(missing); err != nil {
 		t.Fatalf("revoke of a missing snapshot: %v", err)
+	}
+}
+
+func TestIntegrationStateFollowsSAS(t *testing.T) {
+	cred, resourceID := integrationTarget(t)
+	client, err := newARMSnapshotClient(cred, resourceID, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, cleanup, err := GrantAccessAndOpen(t.Context(), cred, resourceID, noCache{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cleanup() })
+
+	if state, err := client.State(t.Context()); err != nil || state != string(armcompute.DiskStateActiveSAS) {
+		t.Fatalf("state while granted = %q, %v; want ActiveSAS", state, err)
+	}
+	if err := cleanup(); err != nil {
+		t.Fatalf("cleanup: %v", err)
+	}
+	if state, err := client.State(t.Context()); err != nil || state != string(armcompute.DiskStateUnattached) {
+		t.Fatalf("state after revoke = %q, %v; want Unattached", state, err)
 	}
 }
 
