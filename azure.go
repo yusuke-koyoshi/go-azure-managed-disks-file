@@ -490,6 +490,7 @@ type SASOption func(*sasBlobOptions)
 
 type sasBlobOptions struct {
 	retry             policy.RetryOptions
+	perRetry          []policy.Policy
 	windowSize        int64
 	skipRangeChecksum bool
 }
@@ -498,6 +499,14 @@ type sasBlobOptions struct {
 // retries 408, 429, 500, 502, 503 and 504 and honors Retry-After.
 func WithRetryOptions(options policy.RetryOptions) SASOption {
 	return func(config *sasBlobOptions) { config.retry = options }
+}
+
+// WithPerRetryPolicies adds policies that run on every attempt of the blob
+// requests, retries included, for example to count throttled responses that
+// the SDK retries and the caller never sees. Each use adds to the policies of
+// earlier uses.
+func WithPerRetryPolicies(policies ...policy.Policy) SASOption {
+	return func(config *sasBlobOptions) { config.perRetry = append(config.perRetry, policies...) }
 }
 
 // WithPageRangeWindow sets the maximum range queried by each Get Page Ranges
@@ -543,8 +552,10 @@ func NewSASBlobAPI(sasURL string, options ...SASOption) BlobAPI {
 	}
 	blobOptions := &blob.ClientOptions{}
 	blobOptions.Retry = config.retry
+	blobOptions.PerRetryPolicies = config.perRetry
 	pageOptions := &pageblob.ClientOptions{}
 	pageOptions.Retry = config.retry
+	pageOptions.PerRetryPolicies = config.perRetry
 	blobClient, blobErr := blob.NewClientWithNoCredential(sasURL, blobOptions)
 	pageClient, pageErr := pageblob.NewClientWithNoCredential(sasURL, pageOptions)
 	if blobErr != nil {

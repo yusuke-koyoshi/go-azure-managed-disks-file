@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -909,6 +910,83 @@ func TestSASBlobAPIReadRangeRetriesServerErrors(t *testing.T) {
 				t.Fatalf("server saw %d requests, want %d", got, test.wantRequests)
 			}
 		})
+	}
+}
+
+// attemptRecorder is a per-retry policy that records each attempt it sees.
+type attemptRecorder struct {
+	mu       sync.Mutex
+	attempts []string
+}
+
+func (r *attemptRecorder) Do(req *policy.Request) (*http.Response, error) {
+	resp, err := req.Next()
+	kind := req.Raw().Method
+	if req.Raw().URL.Query().Get("comp") == "pagelist" {
+		kind = "pagelist"
+	}
+	status := "error"
+	if resp != nil {
+		status = fmt.Sprint(resp.StatusCode)
+	}
+	r.mu.Lock()
+	r.attempts = append(r.attempts, kind+" "+status)
+	r.mu.Unlock()
+	return resp, err
+}
+
+func (r *attemptRecorder) recorded() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.attempts...)
+}
+
+func TestSASBlobAPIPerRetryPolicies(t *testing.T) {
+	data := []byte("azure export range payload")
+	var rangeRequests atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		switch {
+		case request.Method == http.MethodHead:
+			w.Header().Set("Content-Length", fmt.Sprint(len(data)))
+			w.Header().Set("x-ms-blob-type", "PageBlob")
+		case request.URL.Query().Get("comp") == "pagelist":
+			w.Header().Set("Content-Type", "application/xml")
+			_, _ = io.WriteString(w, `<?xml version="1.0" encoding="utf-8"?><PageList />`)
+		default:
+			if rangeRequests.Add(1) <= 2 {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				return
+			}
+			w.Header().Set("Content-MD5", base64.StdEncoding.EncodeToString(md5Sum(data)))
+			w.Header().Set("Content-Range", fmt.Sprintf("bytes 0-%d/%d", len(data)-1, len(data)))
+			w.WriteHeader(http.StatusPartialContent)
+			_, _ = w.Write(data)
+		}
+	}))
+	defer server.Close()
+
+	first, second := &attemptRecorder{}, &attemptRecorder{}
+	api := NewSASBlobAPI(server.URL+"/md-test/blob?sv=test&sig=test",
+		WithRetryOptions(policy.RetryOptions{RetryDelay: time.Millisecond}),
+		WithPerRetryPolicies(first),
+		WithPerRetryPolicies(second))
+	ctx := context.Background()
+	if _, err := api.Size(ctx); err != nil {
+		t.Fatalf("Size: %v", err)
+	}
+	if _, err := api.PageRanges(ctx); err != nil {
+		t.Fatalf("PageRanges: %v", err)
+	}
+	if _, err := api.ReadRange(ctx, 0, int64(len(data))); err != nil {
+		t.Fatalf("ReadRange: %v", err)
+	}
+
+	// The two retried 503s are invisible to the caller, but not to the policies.
+	want := []string{"HEAD 200", "pagelist 200", "GET 503", "GET 503", "GET 206"}
+	for name, recorder := range map[string]*attemptRecorder{"first": first, "second": second} {
+		if got := recorder.recorded(); !slices.Equal(got, want) {
+			t.Errorf("%s policy saw %v, want %v", name, got, want)
+		}
 	}
 }
 
