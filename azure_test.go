@@ -913,7 +913,6 @@ func TestSASBlobAPIReadRangeRetriesServerErrors(t *testing.T) {
 	}
 }
 
-// attemptRecorder is a per-retry policy that records each attempt it sees.
 type attemptRecorder struct {
 	mu       sync.Mutex
 	attempts []string
