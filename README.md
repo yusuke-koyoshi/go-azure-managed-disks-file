@@ -8,8 +8,8 @@ The library reads only the required ranges through an
 without downloading the disk image locally.
 
 This is the Azure counterpart to
-[masahiro331/go-ebs-file](https://github.com/masahiro331/go-ebs-file), and
-follows the same API shape.
+[masahiro331/go-ebs-file](https://github.com/masahiro331/go-ebs-file). Both
+read a snapshot in blocks through a cache, but their APIs differ.
 
 ## Example
 
