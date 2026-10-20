@@ -94,10 +94,8 @@ type snapshotClient interface {
 // already active on the snapshot, so a snapshot supports one reader at a
 // time: when the snapshot already has an active SAS or upload, it returns
 // ErrSnapshotInUse without granting. Two callers that check before either
-// grants can still both grant. The check reads the snapshot, so the credential
-// needs Microsoft.Compute/snapshots/read in addition to the beginGetAccess and
-// endGetAccess actions. A replaced or revoked SAS keeps working for about 30
-// seconds. The cleanup function revokes the SAS and reports a failed
+// grants can still both grant. A replaced or revoked SAS keeps working for
+// about 30 seconds. The cleanup function revokes the SAS and reports a failed
 // revocation; calling it again retries a failed revocation and does nothing
 // after a successful one.
 //

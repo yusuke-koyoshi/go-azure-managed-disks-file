@@ -172,7 +172,6 @@ func TestGrantAccessAndOpen(t *testing.T) {
 		}
 	})
 
-	// Revoking here would withdraw the SAS of the reader the check protects.
 	t.Run("refuses a snapshot in use without granting or revoking", func(t *testing.T) {
 		for _, state := range []armcompute.DiskState{
 			armcompute.DiskStateActiveSAS, armcompute.DiskStateActiveSASFrozen,
@@ -615,10 +614,9 @@ func TestUniqueID(t *testing.T) {
 }
 
 // throttleFirst answers the first request of each HTTP method with 429 and
-// passes the rest to next, so both the first GET and the first POST are
-// retried. Errors from the fake servers are never retried, so the 429 the SDK
-// retries has to come from here. Retry-After-Ms keeps the SDK from waiting its
-// default backoff before the retry.
+// passes the rest to next. Errors from the fake servers are never retried, so
+// the 429 the SDK retries has to come from here. Retry-After-Ms keeps the SDK
+// from waiting its default backoff before the retry.
 type throttleFirst struct {
 	next policy.Transporter
 	sent sync.Map
