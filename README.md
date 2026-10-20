@@ -116,6 +116,11 @@ requests (the default is unlimited) and `PrefetchBlocks` to enable
 cancellable read-ahead. Read-ahead only follows a read that continues where
 the previous one ended, so random access issues no extra requests.
 
+A request that gets no response, such as on a refused connection, fails with a
+`*url.Error` that carries the request URL. `NewSASBlobAPI` replaces the values
+of its query, the SAS signature included, with `REDACTED` before the error
+reaches the SDK retry log, `PerRetryPolicies` or the caller.
+
 ### Range checksums
 
 `NewSASBlobAPI` asks for `x-ms-range-get-content-md5` and validates the

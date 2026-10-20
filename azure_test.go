@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"slices"
 	"strings"
 	"sync"
@@ -18,6 +19,7 @@ import (
 	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/log"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
 )
 
@@ -985,6 +987,67 @@ func TestSASBlobAPIPerRetryPolicies(t *testing.T) {
 	for name, recorder := range map[string]*attemptRecorder{"first": first, "second": second} {
 		if got := recorder.recorded(); !slices.Equal(got, want) {
 			t.Errorf("%s policy saw %v, want %v", name, got, want)
+		}
+	}
+}
+
+type errorRecorder struct {
+	mu     sync.Mutex
+	errors []string
+}
+
+func (r *errorRecorder) Do(req *policy.Request) (*http.Response, error) {
+	resp, err := req.Next()
+	if err != nil {
+		r.mu.Lock()
+		r.errors = append(r.errors, err.Error())
+		r.mu.Unlock()
+	}
+	return resp, err
+}
+
+func TestSASBlobAPIRedactsSASFromTransportErrors(t *testing.T) {
+	server := httptest.NewServer(http.NotFoundHandler())
+	server.Close()
+
+	var logMu sync.Mutex
+	var logged []string
+	log.SetListener(func(_ log.Event, message string) {
+		logMu.Lock()
+		logged = append(logged, message)
+		logMu.Unlock()
+	})
+	t.Cleanup(func() { log.SetListener(nil) })
+
+	recorder := &errorRecorder{}
+	api := NewSASBlobAPI(server.URL+"/md-test/blob?sv=test&sig=SECRET",
+		WithRetryOptions(policy.RetryOptions{MaxRetries: 1, RetryDelay: time.Millisecond}),
+		WithPerRetryPolicies(recorder))
+	ctx := context.Background()
+	for name, call := range map[string]func() error{
+		"Size":       func() error { _, err := api.Size(ctx); return err },
+		"ReadRange":  func() error { _, err := api.ReadRange(ctx, 0, 512); return err },
+		"PageRanges": func() error { _, err := api.PageRanges(ctx); return err },
+	} {
+		err := call()
+		var urlErr *url.Error
+		if !errors.As(err, &urlErr) {
+			t.Fatalf("%s error = %v, want a *url.Error", name, err)
+		}
+		if strings.Contains(err.Error(), "SECRET") {
+			t.Errorf("%s error exposes the SAS signature: %v", name, err)
+		}
+		if !strings.Contains(urlErr.URL, "/md-test/blob?") || !strings.Contains(urlErr.URL, "sig=REDACTED") {
+			t.Errorf("%s error URL = %q, want the path kept and the query redacted", name, urlErr.URL)
+		}
+	}
+
+	if len(recorder.errors) == 0 {
+		t.Fatal("the caller's policy saw no errors")
+	}
+	for _, message := range append(recorder.errors, logged...) {
+		if strings.Contains(message, "SECRET") {
+			t.Errorf("the SAS signature reached a policy or the log: %s", message)
 		}
 	}
 }

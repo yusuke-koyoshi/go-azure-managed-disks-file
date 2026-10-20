@@ -10,9 +10,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -551,12 +553,15 @@ func NewSASBlobAPI(sasURL string, options ...SASOption) BlobAPI {
 			skipRangeChecksum: config.skipRangeChecksum,
 		}
 	}
+	// Last, so that the retry policy's log and the caller's policies only see
+	// redacted transport errors.
+	perRetry := append(slices.Clone(config.perRetry), redactSASPolicy{})
 	blobOptions := &blob.ClientOptions{}
 	blobOptions.Retry = config.retry
-	blobOptions.PerRetryPolicies = config.perRetry
+	blobOptions.PerRetryPolicies = perRetry
 	pageOptions := &pageblob.ClientOptions{}
 	pageOptions.Retry = config.retry
-	pageOptions.PerRetryPolicies = config.perRetry
+	pageOptions.PerRetryPolicies = perRetry
 	blobClient, blobErr := blob.NewClientWithNoCredential(sasURL, blobOptions)
 	pageClient, pageErr := pageblob.NewClientWithNoCredential(sasURL, pageOptions)
 	if blobErr != nil {
@@ -572,6 +577,33 @@ func NewSASBlobAPI(sasURL string, options ...SASOption) BlobAPI {
 		windowSize:        config.windowSize,
 		skipRangeChecksum: config.skipRangeChecksum,
 	}
+}
+
+// redactSASPolicy redacts the query of the URL in a transport error, which
+// net/http fills with the full request URL, signature included. The error is
+// changed in place, so errors.Is and errors.As still work on it.
+type redactSASPolicy struct{}
+
+func (redactSASPolicy) Do(req *policy.Request) (*http.Response, error) {
+	resp, err := req.Next()
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		urlErr.URL = redactQuery(urlErr.URL)
+	}
+	return resp, err
+}
+
+func redactQuery(rawURL string) string {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return "REDACTED"
+	}
+	query := parsed.Query()
+	for key := range query {
+		query[key] = []string{"REDACTED"}
+	}
+	parsed.RawQuery = query.Encode()
+	return parsed.String()
 }
 
 func (a *sasBlobAPI) BlobIdentifier() string { return a.identifier }
