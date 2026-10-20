@@ -85,6 +85,10 @@ SAS propagates. `PerRetryPolicies` run on every attempt of the blob and ARM
 requests, including those the SDK retries, for example to count throttled
 responses that never reach the caller.
 
+`snapshot.UniqueID` returns the snapshot's `uniqueId`. A resource ID is reused
+when a snapshot is deleted and recreated under the same name, so key results
+cached for a snapshot by its `uniqueId` rather than by the resource ID alone.
+
 `Duration: 0` uses a 20-minute SAS. Both `GrantAccessAndOpen` and
 `GrantAccessAndOpenWithOptions` revoke the SAS during cleanup and validate
 range checksums by default. Set `SkipRevokeOnCleanup` or `SkipRangeChecksum`

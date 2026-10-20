@@ -95,13 +95,10 @@ func GrantAccessAndOpenWithOptions(
 	cache azurediskfile.Cache[string, []byte],
 	options Options,
 ) (*io.SectionReader, func() error, error) {
-	if cred == nil {
-		return nil, nil, errors.New("snapshot: nil TokenCredential")
-	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	id, err := parseSnapshotID(resourceID)
+	snapshots, err := newARMSnapshotClient(cred, resourceID, options)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -109,19 +106,53 @@ func GrantAccessAndOpenWithOptions(
 	if err != nil {
 		return nil, nil, err
 	}
+	return grantAccessAndOpen(ctx, snapshots, durationSeconds, cache, options)
+}
+
+// UniqueID returns the uniqueId of the snapshot. Unlike the resource ID, it
+// changes when a snapshot is deleted and recreated under the same name, so it
+// can key results cached for the snapshot. Only options.PerRetryPolicies is
+// used; it takes Options so that callers can pass the value they pass to
+// GrantAccessAndOpenWithOptions.
+func UniqueID(ctx context.Context, cred azcore.TokenCredential, resourceID string, options Options) (string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	snapshots, err := newARMSnapshotClient(cred, resourceID, options)
+	if err != nil {
+		return "", err
+	}
+	resp, err := snapshots.client.Get(ctx, snapshots.resourceGroup, snapshots.name, nil)
+	if err != nil {
+		return "", err
+	}
+	// An empty ID would key the cache by the reusable resource ID alone.
+	if resp.Properties == nil || resp.Properties.UniqueID == nil || *resp.Properties.UniqueID == "" {
+		return "", errors.New("snapshot: the snapshot has no uniqueId")
+	}
+	return *resp.Properties.UniqueID, nil
+}
+
+func newARMSnapshotClient(cred azcore.TokenCredential, resourceID string, options Options) (*armSnapshotClient, error) {
+	if cred == nil {
+		return nil, errors.New("snapshot: nil TokenCredential")
+	}
+	id, err := parseSnapshotID(resourceID)
+	if err != nil {
+		return nil, err
+	}
 	clientOptions := &arm.ClientOptions{}
 	clientOptions.PerRetryPolicies = options.PerRetryPolicies
 	clientOptions.Transport = armTransport
 	client, err := armcompute.NewSnapshotsClient(id.SubscriptionID, cred, clientOptions)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
-	snapshots := &armSnapshotClient{
+	return &armSnapshotClient{
 		client:        client,
 		resourceGroup: id.ResourceGroupName,
 		name:          id.Name,
-	}
-	return grantAccessAndOpen(ctx, snapshots, durationSeconds, cache, options)
+	}, nil
 }
 
 // parseSnapshotID requires resourceID to name a snapshot. Only the name reaches

@@ -126,3 +126,14 @@ func TestIntegrationRevokeMissingSnapshot(t *testing.T) {
 		t.Fatalf("revoke of a missing snapshot: %v", err)
 	}
 }
+
+func TestIntegrationUniqueID(t *testing.T) {
+	cred, resourceID := integrationTarget(t)
+	id, err := UniqueID(t.Context(), cred, resourceID, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(id) != len("00000000-0000-0000-0000-000000000000") {
+		t.Fatalf("uniqueId = %q, want a GUID", id)
+	}
+}

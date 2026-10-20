@@ -485,6 +485,85 @@ func (r *attemptRecorder) recorded() []string {
 	return append([]string(nil), r.attempts...)
 }
 
+func useARMTransport(t *testing.T, transport policy.Transporter) {
+	t.Helper()
+	original := armTransport
+	armTransport = transport
+	t.Cleanup(func() { armTransport = original })
+}
+
+func TestUniqueID(t *testing.T) {
+	const resourceID = "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.Compute/snapshots/snap"
+	for _, test := range []struct {
+		name       string
+		resourceID string
+		nilCred    bool
+		properties *armcompute.SnapshotProperties
+		getStatus  int
+		want       string
+		wantErr    string
+		wantGets   int64
+	}{
+		{
+			name:       "returns the uniqueId",
+			properties: &armcompute.SnapshotProperties{UniqueID: new("2f0c4a0e-0000-4000-8000-000000000001")},
+			want:       "2f0c4a0e-0000-4000-8000-000000000001",
+			wantGets:   1,
+		},
+		{name: "empty uniqueId", properties: &armcompute.SnapshotProperties{UniqueID: new("")}, wantErr: "no uniqueId", wantGets: 1},
+		{name: "no properties", wantErr: "no uniqueId", wantGets: 1},
+		{name: "Get fails", getStatus: http.StatusNotFound, wantErr: "ResourceNotFound", wantGets: 1},
+		{
+			name:       "disk resource ID",
+			resourceID: "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.Compute/disks/snap",
+			wantErr:    "must identify a snapshot",
+		},
+		{name: "nil credential", nilCred: true, wantErr: "nil TokenCredential"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var gets atomic.Int64
+			useARMTransport(t, fake.NewSnapshotsServerTransport(&fake.SnapshotsServer{
+				Get: func(context.Context, string, string, *armcompute.SnapshotsClientGetOptions) (resp azfake.Responder[armcompute.SnapshotsClientGetResponse], errResp azfake.ErrorResponder) {
+					gets.Add(1)
+					if test.getStatus != 0 {
+						errResp.SetResponseError(test.getStatus, "ResourceNotFound")
+						return
+					}
+					resp.SetResponse(http.StatusOK, armcompute.SnapshotsClientGetResponse{
+						Snapshot: armcompute.Snapshot{Properties: test.properties},
+					}, nil)
+					return
+				},
+			}))
+			id := test.resourceID
+			if id == "" {
+				id = resourceID
+			}
+			var cred azcore.TokenCredential = &azfake.TokenCredential{}
+			if test.nilCred {
+				cred = nil
+			}
+			recorder := &attemptRecorder{}
+			got, err := UniqueID(t.Context(), cred, id, Options{PerRetryPolicies: []policy.Policy{recorder}})
+			if test.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), test.wantErr) {
+					t.Fatalf("UniqueID error = %v, want it to contain %q", err, test.wantErr)
+				}
+			} else if err != nil || got != test.want {
+				t.Fatalf("UniqueID = %q, %v; want %q", got, err, test.want)
+			}
+			if n := gets.Load(); n != test.wantGets {
+				t.Errorf("Get calls = %d, want %d", n, test.wantGets)
+			}
+			if test.wantGets > 0 {
+				if attempts := recorder.recorded(); len(attempts) != 1 || !strings.HasSuffix(attempts[0], "SnapshotsClient.Get") {
+					t.Errorf("policy saw %v, want one SnapshotsClient.Get attempt", attempts)
+				}
+			}
+		})
+	}
+}
+
 // throttleFirst answers the first request with 429 and passes the rest to
 // next. Errors from the fake servers are never retried, so the 429 the SDK
 // retries has to come from here.
@@ -516,9 +595,7 @@ func TestGrantAccessAndOpenWithOptionsPerRetryPolicies(t *testing.T) {
 			return
 		},
 	}
-	original := armTransport
-	armTransport = &throttleFirst{next: fake.NewSnapshotsServerTransport(server)}
-	t.Cleanup(func() { armTransport = original })
+	useARMTransport(t, &throttleFirst{next: fake.NewSnapshotsServerTransport(server)})
 
 	recorder := &attemptRecorder{}
 	reader, cleanup, err := GrantAccessAndOpenWithOptions(t.Context(), &azfake.TokenCredential{},
