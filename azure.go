@@ -20,7 +20,6 @@ import (
 	"sync/atomic"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
-	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/blob"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/pageblob"
 	"golang.org/x/sync/singleflight"
@@ -638,7 +637,7 @@ func (a *sasBlobAPI) ReadRange(ctx context.Context, off, count int64) ([]byte, e
 		rangeGetContentMD5 = rangeGetContentMD5Option(count)
 	}
 	response, err := a.blob.DownloadStream(ctx, &blob.DownloadStreamOptions{
-		Range:              azblob.HTTPRange{Offset: off, Count: count},
+		Range:              blob.HTTPRange{Offset: off, Count: count},
 		RangeGetContentMD5: rangeGetContentMD5,
 	})
 	if err != nil {
@@ -689,7 +688,7 @@ func (a *sasBlobAPI) PageRanges(ctx context.Context) ([]Range, error) {
 	for start := int64(0); start < size; start += a.windowSize {
 		count := min(a.windowSize, size-start)
 		pager := a.pageBlob.NewGetPageRangesPager(&pageblob.GetPageRangesOptions{
-			Range: azblob.HTTPRange{Offset: start, Count: count},
+			Range: blob.HTTPRange{Offset: start, Count: count},
 		})
 		for pager.More() {
 			response, err := pager.NextPage(ctx)
