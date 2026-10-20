@@ -57,6 +57,11 @@ type Options struct {
 	// the caller's context are done. The policies serve concurrent requests,
 	// so they must be safe for concurrent use.
 	PerRetryPolicies []policy.Policy
+	// Transport replaces the HTTP transport of both the ARM and the blob
+	// clients, for example for tests or a proxy, so a fake has to serve or
+	// route both hosts. The retry and per-retry policies still run in front of
+	// it. Nil keeps the SDK default.
+	Transport policy.Transporter
 }
 
 // snapshotClient is the part of armcompute.SnapshotsClient this package uses.
@@ -115,8 +120,8 @@ func GrantAccessAndOpenWithOptions(
 // can key results cached for the snapshot. The snapshot can be recreated
 // between this call and a later grant, so a caller that keys a cache by the
 // result can call it again afterwards and compare. Only
-// options.PerRetryPolicies is used; it takes Options so that callers can pass
-// the value they pass to GrantAccessAndOpenWithOptions.
+// options.PerRetryPolicies and options.Transport are used; it takes Options so
+// that callers can pass the value they pass to GrantAccessAndOpenWithOptions.
 func UniqueID(ctx context.Context, cred azcore.TokenCredential, resourceID string, options Options) (string, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -146,7 +151,7 @@ func newARMSnapshotClient(cred azcore.TokenCredential, resourceID string, option
 	}
 	clientOptions := &arm.ClientOptions{}
 	clientOptions.PerRetryPolicies = options.PerRetryPolicies
-	clientOptions.Transport = armTransport
+	clientOptions.Transport = options.Transport
 	client, err := armcompute.NewSnapshotsClient(id.SubscriptionID, cred, clientOptions)
 	if err != nil {
 		return nil, err
@@ -207,6 +212,7 @@ func grantAccessAndOpen(
 	sasOptions := []azurediskfile.SASOption{
 		azurediskfile.WithRetryOptions(options.Retry),
 		azurediskfile.WithPerRetryPolicies(options.PerRetryPolicies...),
+		azurediskfile.WithTransport(options.Transport),
 	}
 	if options.SkipRangeChecksum {
 		sasOptions = append(sasOptions, azurediskfile.WithoutRangeChecksum())

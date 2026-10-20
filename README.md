@@ -83,7 +83,9 @@ retry policy for the blob requests, not for the grant and revocation. Leave
 403 out of `Retry.StatusCodes`: the package already retries it while a new
 SAS propagates. `PerRetryPolicies` run on every attempt of the blob and ARM
 requests, including those the SDK retries, for example to count throttled
-responses that never reach the caller.
+responses that never reach the caller. `Transport` replaces the HTTP transport
+of both the ARM and the blob clients, for example for tests or a proxy; the
+retry and per-retry policies still run in front of it.
 
 `snapshot.UniqueID` returns the snapshot's `uniqueId`. A resource ID is reused
 when a snapshot is deleted and recreated under the same name, so key results

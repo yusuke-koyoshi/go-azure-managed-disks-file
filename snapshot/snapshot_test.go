@@ -485,13 +485,6 @@ func (r *attemptRecorder) recorded() []string {
 	return append([]string(nil), r.attempts...)
 }
 
-func useARMTransport(t *testing.T, transport policy.Transporter) {
-	t.Helper()
-	original := armTransport
-	armTransport = transport
-	t.Cleanup(func() { armTransport = original })
-}
-
 func TestUniqueID(t *testing.T) {
 	const resourceID = "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.Compute/snapshots/snap"
 	for _, test := range []struct {
@@ -522,7 +515,7 @@ func TestUniqueID(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			var gets atomic.Int64
-			useARMTransport(t, fake.NewSnapshotsServerTransport(&fake.SnapshotsServer{
+			transport := fake.NewSnapshotsServerTransport(&fake.SnapshotsServer{
 				Get: func(context.Context, string, string, *armcompute.SnapshotsClientGetOptions) (resp azfake.Responder[armcompute.SnapshotsClientGetResponse], errResp azfake.ErrorResponder) {
 					gets.Add(1)
 					if test.getStatus != 0 {
@@ -534,7 +527,7 @@ func TestUniqueID(t *testing.T) {
 					}, nil)
 					return
 				},
-			}))
+			})
 			id := test.resourceID
 			if id == "" {
 				id = resourceID
@@ -544,7 +537,10 @@ func TestUniqueID(t *testing.T) {
 				cred = nil
 			}
 			recorder := &attemptRecorder{}
-			got, err := UniqueID(t.Context(), cred, id, Options{PerRetryPolicies: []policy.Policy{recorder}})
+			got, err := UniqueID(t.Context(), cred, id, Options{
+				PerRetryPolicies: []policy.Policy{recorder},
+				Transport:        transport,
+			})
 			if test.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), test.wantErr) {
 					t.Fatalf("UniqueID error = %v, want it to contain %q", err, test.wantErr)
@@ -581,9 +577,26 @@ func (t *throttleFirst) Do(req *http.Request) (*http.Response, error) {
 	return t.next.Do(req)
 }
 
+// hostRouter sends the requests for blobHost to the blob test server and the
+// rest to arm, the way a caller's fake has to serve both clients.
+type hostRouter struct {
+	blobHost     string
+	arm          policy.Transporter
+	blobRequests atomic.Int64
+}
+
+func (r *hostRouter) Do(req *http.Request) (*http.Response, error) {
+	if req.URL.Host != r.blobHost {
+		return r.arm.Do(req)
+	}
+	r.blobRequests.Add(1)
+	return http.DefaultTransport.RoundTrip(req)
+}
+
 func TestGrantAccessAndOpenWithOptionsPerRetryPolicies(t *testing.T) {
 	data := []byte("snapshot payload")
-	sas := newBlobServer(t, data).URL + "/md-test/blob?sv=test&sig=test"
+	blobServer := newBlobServer(t, data)
+	sas := blobServer.URL + "/md-test/blob?sv=test&sig=test"
 	server := &fake.SnapshotsServer{
 		BeginGrantAccess: func(context.Context, string, string, armcompute.GrantAccessData, *armcompute.SnapshotsClientBeginGrantAccessOptions) (resp azfake.PollerResponder[armcompute.SnapshotsClientGrantAccessResponse], errResp azfake.ErrorResponder) {
 			resp.AddNonTerminalResponse(http.StatusAccepted, nil)
@@ -597,13 +610,17 @@ func TestGrantAccessAndOpenWithOptionsPerRetryPolicies(t *testing.T) {
 			return
 		},
 	}
-	useARMTransport(t, &throttleFirst{next: fake.NewSnapshotsServerTransport(server)})
+	router := &hostRouter{
+		blobHost: blobServer.Listener.Addr().String(),
+		arm:      &throttleFirst{next: fake.NewSnapshotsServerTransport(server)},
+	}
 
 	recorder := &attemptRecorder{}
 	reader, cleanup, err := GrantAccessAndOpenWithOptions(t.Context(), &azfake.TokenCredential{},
 		"/subscriptions/sub/resourceGroups/rg/providers/Microsoft.Compute/snapshots/snap", nil, Options{
 			SkipRangeChecksum: true,
 			PerRetryPolicies:  []policy.Policy{recorder},
+			Transport:         router,
 		})
 	if err != nil {
 		t.Fatal(err)
@@ -628,6 +645,9 @@ func TestGrantAccessAndOpenWithOptionsPerRetryPolicies(t *testing.T) {
 	}
 	if got := recorder.recorded(); !slices.Equal(got, want) {
 		t.Errorf("policy saw\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+	if n := router.blobRequests.Load(); n != 3 {
+		t.Errorf("the transport saw %d blob requests, want 3", n)
 	}
 }
 

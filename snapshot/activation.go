@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
-	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
 	azurediskfile "github.com/yusuke-koyoshi/go-azure-managed-disks-file"
 )
 
@@ -19,11 +18,6 @@ const (
 // Tests replace it, because network I/O keeps a synctest bubble's clock from
 // advancing.
 var newSASBlobAPI = azurediskfile.NewSASBlobAPI
-
-// armTransport replaces the ARM client's HTTP transport in tests, so that a
-// fake server answers while the client's policies still run. Nil uses the
-// SDK default.
-var armTransport policy.Transporter
 
 // activatingBlobAPI retries 403 until activeBy, while the new SAS reaches the
 // storage front ends one at a time.

@@ -492,6 +492,7 @@ type SASOption func(*sasBlobOptions)
 type sasBlobOptions struct {
 	retry             policy.RetryOptions
 	perRetry          []policy.Policy
+	transport         policy.Transporter
 	windowSize        int64
 	skipRangeChecksum bool
 }
@@ -509,6 +510,13 @@ func WithRetryOptions(options policy.RetryOptions) SASOption {
 // for concurrent use.
 func WithPerRetryPolicies(policies ...policy.Policy) SASOption {
 	return func(config *sasBlobOptions) { config.perRetry = append(config.perRetry, policies...) }
+}
+
+// WithTransport replaces the HTTP transport of the blob clients, for example
+// for tests or a proxy. The retry and per-retry policies still run in front
+// of it. Nil keeps the SDK default.
+func WithTransport(transport policy.Transporter) SASOption {
+	return func(config *sasBlobOptions) { config.transport = transport }
 }
 
 // WithPageRangeWindow sets the maximum range queried by each Get Page Ranges
@@ -558,9 +566,11 @@ func NewSASBlobAPI(sasURL string, options ...SASOption) BlobAPI {
 	blobOptions := &blob.ClientOptions{}
 	blobOptions.Retry = config.retry
 	blobOptions.PerRetryPolicies = perRetry
+	blobOptions.Transport = config.transport
 	pageOptions := &pageblob.ClientOptions{}
 	pageOptions.Retry = config.retry
 	pageOptions.PerRetryPolicies = perRetry
+	pageOptions.Transport = config.transport
 	blobClient, blobErr := blob.NewClientWithNoCredential(sasURL, blobOptions)
 	pageClient, pageErr := pageblob.NewClientWithNoCredential(sasURL, pageOptions)
 	if blobErr != nil {
