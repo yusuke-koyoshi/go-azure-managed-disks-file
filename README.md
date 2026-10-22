@@ -111,6 +111,14 @@ reads the snapshot, so the credential needs `Microsoft.Compute/snapshots/read`
 in addition to `Microsoft.Compute/snapshots/beginGetAccess/action` and
 `Microsoft.Compute/snapshots/endGetAccess/action`.
 
+The snapshot's export settings must allow reading with the SAS alone. A
+`networkAccessPolicy` of `DenyAll` blocks the export, and `AllowPrivate`
+limits it to clients in the subnet of the disk access resource's private
+endpoint. A `publicNetworkAccess` of `Disabled` blocks reads over the internet
+even under `AllowAll`. A `dataAccessAuthMode` of `AzureActiveDirectory` also
+requires a Microsoft Entra ID token on the download, which the package does
+not send, so such a snapshot cannot be read.
+
 SAS changes take up to about 30 seconds to reach Azure Storage, and they reach
 its front ends one at a time, so a new SAS can be rejected with 403 even after
 an earlier request succeeded. The `snapshot` package therefore retries 403 on
