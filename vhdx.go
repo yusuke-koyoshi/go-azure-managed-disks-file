@@ -12,8 +12,7 @@ import (
 	"strings"
 )
 
-// The layout follows [MS-VHDX]. Azure exports a snapshot with a 4096-byte
-// logical sector size only as VHDX.
+// The layout follows [MS-VHDX].
 
 const (
 	vhdxHeaderSize      = 4 << 10
@@ -22,6 +21,10 @@ const (
 	vhdxHeadSize   = 320 << 10
 	vhdxMaxEntries = 2047
 	vhdxMaxSize    = 64 << 40
+	// The caps bound the memory that a forged header can make Open allocate.
+	// Azure writes a 1 MiB metadata region and at most 2^18 blocks.
+	vhdxMaxMetadata = 1 << 20
+	vhdxMaxBlocks   = 1 << 22
 
 	vhdxBlockNotPresent   = 0
 	vhdxBlockUndefined    = 1
@@ -64,7 +67,6 @@ func vhdxGUID(s string) [16]byte {
 	return g
 }
 
-// vhdxBlobAPI presents the virtual disk stored in a VHDX blob.
 type vhdxBlobAPI struct {
 	inner     BlobAPI
 	size      int64
@@ -78,19 +80,27 @@ type vhdxRegion struct {
 	offset, length int64
 }
 
-// unwrapVHDX returns api unchanged unless the blob starts with the VHDX file
-// identifier, which no raw disk does: its first sector holds a boot record or
-// a protective MBR.
-func unwrapVHDX(ctx context.Context, api BlobAPI, size int64) (BlobAPI, int64, error) {
-	if size < vhdxHeadSize {
+func unwrapVHDX(ctx context.Context, api BlobAPI, size int64, format Format) (BlobAPI, int64, error) {
+	switch format {
+	case FormatRaw:
 		return api, size, nil
-	}
-	prefix, err := readFull(ctx, api, 0, int64(len(vhdxSignature)))
-	if err != nil {
-		return nil, 0, fmt.Errorf("azurediskfile: read the file identifier: %w", err)
-	}
-	if !bytes.Equal(prefix, vhdxSignature) {
-		return api, size, nil
+	case FormatAuto:
+		if size < vhdxHeadSize {
+			return api, size, nil
+		}
+		prefix, err := readFull(ctx, api, 0, int64(len(vhdxSignature)))
+		if err != nil {
+			return nil, 0, fmt.Errorf("azurediskfile: read the file identifier: %w", err)
+		}
+		if !bytes.Equal(prefix, vhdxSignature) {
+			return api, size, nil
+		}
+	case FormatVHDX:
+		if size < vhdxHeadSize {
+			return nil, 0, fmt.Errorf("azurediskfile: VHDX: the %d-byte blob is too small", size)
+		}
+	default:
+		return nil, 0, fmt.Errorf("azurediskfile: unknown format %d", format)
 	}
 	vhdx, err := openVHDX(ctx, api, size)
 	if err != nil {
@@ -104,6 +114,9 @@ func openVHDX(ctx context.Context, inner BlobAPI, fileSize int64) (*vhdxBlobAPI,
 	if err != nil {
 		return nil, err
 	}
+	if !bytes.Equal(head[:len(vhdxSignature)], vhdxSignature) {
+		return nil, errors.New("azurediskfile: VHDX: no file identifier")
+	}
 	if err := checkVHDXHeader(head); err != nil {
 		return nil, err
 	}
@@ -112,6 +125,9 @@ func openVHDX(ctx context.Context, inner BlobAPI, fileSize int64) (*vhdxBlobAPI,
 		return nil, err
 	}
 	metadataRegion, batRegion := regions[vhdxMetadataRegion], regions[vhdxBATRegion]
+	if metadataRegion.length > vhdxMaxMetadata {
+		return nil, fmt.Errorf("azurediskfile: VHDX: unsupported %d-byte metadata region", metadataRegion.length)
+	}
 	metadata, err := readFull(ctx, inner, metadataRegion.offset, metadataRegion.length)
 	if err != nil {
 		return nil, err
@@ -122,6 +138,9 @@ func openVHDX(ctx context.Context, inner BlobAPI, fileSize int64) (*vhdxBlobAPI,
 	}
 
 	blocks := (size + blockSize - 1) / blockSize
+	if blocks > vhdxMaxBlocks {
+		return nil, fmt.Errorf("azurediskfile: VHDX: unsupported %d payload blocks", blocks)
+	}
 	// A sector bitmap entry follows every chunkRatio payload entries.
 	chunkRatio := (1 << 23) * sectorSize / blockSize
 	entries := blocks + (blocks-1)/chunkRatio
@@ -298,11 +317,7 @@ func readFull(ctx context.Context, api BlobAPI, off, count int64) ([]byte, error
 
 func (v *vhdxBlobAPI) BlobIdentifier() string {
 	if identified, ok := v.inner.(blobIdentifier); ok {
-		if id := identified.BlobIdentifier(); id != "" {
-			// Blocks of the virtual disk must not share keys with blocks of the
-			// blob.
-			return id + "#vhdx"
-		}
+		return identified.BlobIdentifier()
 	}
 	return ""
 }

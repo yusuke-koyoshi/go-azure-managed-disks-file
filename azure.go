@@ -75,7 +75,25 @@ type OpenOptions struct {
 	// memory a read uses outside the cache. A non-positive value leaves block
 	// fetching unlimited.
 	MaxConcurrentBlocks int
+	// Format selects how the blob stores the disk. Set it when the format is
+	// known: the start of a VHD blob is the disk's first sector, which whoever
+	// controls the disk can write.
+	Format Format
 }
+
+// Format is how a blob stores a disk.
+type Format int
+
+const (
+	// FormatAuto reads a blob that starts with the VHDX file identifier as
+	// FormatVHDX and any other blob as FormatRaw.
+	FormatAuto Format = iota
+	// FormatRaw reads the blob as is. A VHD export is read this way, so its
+	// size includes the 512-byte footer.
+	FormatRaw
+	// FormatVHDX reads the virtual disk inside a VHDX blob.
+	FormatVHDX
+)
 
 // Open opens api as a concurrent-safe *io.SectionReader. The returned reader's
 // ReadAt method may be called concurrently. Blocks are fetched in parallel,
@@ -85,9 +103,8 @@ type OpenOptions struct {
 // does not provide BlobIdentifier, the reader gets a unique identity and its
 // blocks are not shared with other readers through a shared cache.
 //
-// A blob that starts with the VHDX file identifier is read as the virtual disk
-// inside it, so the reader's size is the virtual disk size. A VHD blob is read
-// as is, so its size includes the 512-byte footer.
+// A VHDX blob is read as the virtual disk inside it, so the reader's size is
+// the virtual disk size. OpenOptions.Format selects the format.
 //
 // A panic in api or cache while a block is fetched ends the process when the
 // fetch runs in a goroutine started by the reader: in a read that fetches
@@ -112,7 +129,7 @@ func OpenWithOptions(ctx context.Context, api BlobAPI, cache Cache[string, []byt
 	if size < 0 {
 		return nil, fmt.Errorf("azurediskfile: invalid blob size %d", size)
 	}
-	api, size, err = unwrapVHDX(ctx, api, size)
+	api, size, err = unwrapVHDX(ctx, api, size, options.Format)
 	if err != nil {
 		return nil, err
 	}
@@ -132,6 +149,12 @@ func OpenWithOptions(ctx context.Context, api BlobAPI, cache Cache[string, []byt
 		if identifiedID := identified.BlobIdentifier(); identifiedID != "" {
 			id = identifiedID
 		}
+	}
+	// A VHDX blob and its virtual disk share the identifier but not the blocks.
+	if _, ok := api.(*vhdxBlobAPI); ok {
+		id = "vhdx:" + id
+	} else {
+		id = "raw:" + id
 	}
 	r := &blobReader{
 		ctx:            ctx,

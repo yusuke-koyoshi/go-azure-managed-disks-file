@@ -215,17 +215,25 @@ func TestGrantAccessAndOpen(t *testing.T) {
 		}
 	})
 
-	t.Run("grants VHDX only for 4096-byte sectors", func(t *testing.T) {
+	t.Run("grants and opens VHDX only for 4096-byte sectors", func(t *testing.T) {
+		// A disk can start with the VHDX file identifier, so only the grant
+		// decides the format.
+		vhdxLike := append([]byte("vhdxfile"), make([]byte, 320<<10)...)
 		for sectorSize, want := range map[int32]armcompute.FileFormat{
 			0: "", 512: "", 4096: armcompute.FileFormatVHDX,
 		} {
-			client := newFakeClient(t, data)
+			client := newFakeClient(t, vhdxLike)
 			client.sectorSize = sectorSize
-			if _, _, err := grantAccessAndOpen(t.Context(), client, durationSeconds, nil, Options{}); err != nil {
-				t.Fatalf("sector size %d: %v", sectorSize, err)
-			}
+			reader, _, err := grantAccessAndOpen(t.Context(), client, durationSeconds, nil, Options{SkipRangeChecksum: true})
 			if got := client.fileFormats; !slices.Equal(got, []armcompute.FileFormat{want}) {
 				t.Errorf("sector size %d: file formats = %q, want [%q]", sectorSize, got, want)
+			}
+			if want == "" {
+				if err != nil || reader.Size() != int64(len(vhdxLike)) {
+					t.Errorf("sector size %d: %v; want the blob read as is", sectorSize, err)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), "VHDX") {
+				t.Errorf("sector size %d: error = %v, want a VHDX error", sectorSize, err)
 			}
 		}
 	})

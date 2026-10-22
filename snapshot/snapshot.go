@@ -48,7 +48,8 @@ type Options struct {
 	SkipRangeChecksum bool
 	// Open configures the reader, such as MaxConcurrentBlocks and
 	// PrefetchBlocks. The zero value is what Open uses. A BlockSize above
-	// 4 MiB reads without range checksum validation.
+	// 4 MiB reads without range checksum validation. Format is replaced with
+	// the format the grant asks for.
 	Open azurediskfile.OpenOptions
 	// Retry replaces the Azure SDK retry policy for the blob requests (size,
 	// page ranges and range reads), not for the grant and revocation. The
@@ -81,7 +82,6 @@ var ErrSnapshotInUse = errors.New("snapshot: the snapshot already has an active 
 // and lets that lifecycle be exercised without ARM.
 type snapshotClient interface {
 	Properties(ctx context.Context) (snapshotProperties, error)
-	// GrantReadAccess omits the file format when fileFormat is "".
 	GrantReadAccess(ctx context.Context, durationSeconds int32, fileFormat armcompute.FileFormat) (string, error)
 	RevokeAccess(ctx context.Context) error
 }
@@ -263,7 +263,12 @@ func grantAccessAndOpen(
 		api:      newSASBlobAPI(sas, sasOptions...),
 		activeBy: time.Now().Add(sasActivationTimeout),
 	}
-	reader, err := azurediskfile.OpenWithOptions(ctx, api, cache, options.Open)
+	openOptions := options.Open
+	openOptions.Format = azurediskfile.FormatRaw
+	if fileFormat == armcompute.FileFormatVHDX {
+		openOptions.Format = azurediskfile.FormatVHDX
+	}
+	reader, err := azurediskfile.OpenWithOptions(ctx, api, cache, openOptions)
 	if err != nil {
 		return nil, nil, errors.Join(err, revokeDetached(client))
 	}

@@ -206,15 +206,58 @@ func TestOpenVHDXMapsPageRanges(t *testing.T) {
 
 func TestOpenVHDXKeysTheCacheApartFromTheBlob(t *testing.T) {
 	cache := &testCache{values: map[string][]byte{}}
-	reader, err := Open(t.Context(), &vhdxBlob{head: loadAzureVHDX(t)}, cache)
+	blob := &vhdxBlob{head: loadAzureVHDX(t)}
+	raw, err := OpenWithOptions(t.Context(), blob, cache, OpenOptions{Format: FormatRaw})
 	if err != nil {
 		t.Fatal(err)
 	}
-	readVHDXAt(t, reader, 0, 8)
-	for key := range cache.values {
-		if !strings.HasPrefix(key, "blob#vhdx:") {
-			t.Errorf("cache key %q, want the prefix blob#vhdx:", key)
-		}
+	if got := readVHDXAt(t, raw, 0, 8); string(got) != "vhdxfile" {
+		t.Fatalf("raw blob starts with %q, want vhdxfile", got)
+	}
+	vhdx, err := Open(t.Context(), blob, cache)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantVHDXPattern(t, readVHDXAt(t, vhdx, 0, 8), azureVHDXDataOffset)
+}
+
+func TestOpenFormatRawReadsAVHDXBlobAsIs(t *testing.T) {
+	blob := &vhdxBlob{head: loadAzureVHDX(t)}
+	reader, err := OpenWithOptions(t.Context(), blob, nil, OpenOptions{Format: FormatRaw})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reader.Size() != azureVHDXFileSize {
+		t.Errorf("size = %d, want the blob size %d", reader.Size(), azureVHDXFileSize)
+	}
+	if reads := blob.takeReads(); len(reads) != 0 {
+		t.Errorf("Open read %v, want nothing", reads)
+	}
+}
+
+func TestOpenFormatAutoReadsOtherBlobsAsIs(t *testing.T) {
+	blob := &testBlob{id: "raw", data: bytes.Repeat([]byte("raw disk"), vhdxHeadSize/8)}
+	reader, err := Open(t.Context(), blob, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reader.Size() != vhdxHeadSize {
+		t.Errorf("size = %d, want %d", reader.Size(), vhdxHeadSize)
+	}
+	// Only the file identifier is read.
+	if n := blob.requests.Load(); n != 1 {
+		t.Errorf("Open made %d requests, want 1", n)
+	}
+	if got := readVHDXAt(t, reader, 0, 8); string(got) != "raw disk" {
+		t.Errorf("read %q, want raw disk", got)
+	}
+}
+
+func TestOpenFormatVHDXRejectsOtherBlobs(t *testing.T) {
+	blob := &testBlob{id: "raw", data: make([]byte, vhdxHeadSize)}
+	_, err := OpenWithOptions(t.Context(), blob, nil, OpenOptions{Format: FormatVHDX})
+	if err == nil || !strings.Contains(err.Error(), "no file identifier") {
+		t.Fatalf("error = %v, want no file identifier", err)
 	}
 }
 
@@ -278,6 +321,18 @@ func TestOpenVHDXRejects(t *testing.T) {
 		{"a block in the header section", func(head []byte) {
 			setVHDXBATEntry(head, 0, vhdxBlockFullyPresent)
 		}, "outside"},
+		{"a large metadata region", func(head []byte) {
+			for _, off := range vhdxRegionTableOffsets {
+				table := head[off : off+vhdxRegionTableSize]
+				// The second entry is the metadata region.
+				binary.LittleEndian.PutUint32(table[16+32+24:], 2<<20)
+				fixVHDXChecksum(table)
+			}
+		}, "metadata region"},
+		{"too many blocks", func(head []byte) {
+			binary.LittleEndian.PutUint32(head[azureVHDXMetadata+64<<10:], 1<<20)
+			binary.LittleEndian.PutUint64(head[azureVHDXMetadata+64<<10+8:], 8<<40)
+		}, "payload blocks"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

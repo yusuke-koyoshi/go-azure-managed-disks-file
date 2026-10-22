@@ -473,7 +473,7 @@ func TestReadAtSingleBlockPanicReachesCaller(t *testing.T) {
 
 func TestReadAtRejectsShortCachedBlock(t *testing.T) {
 	api := &testBlob{id: "short", data: []byte("01234567")}
-	cache := &testCache{values: map[string][]byte{"short:4:1": []byte("45")}}
+	cache := &testCache{values: map[string][]byte{"raw:short:4:1": []byte("45")}}
 	reader, err := OpenWithOptions(context.Background(), api, cache, OpenOptions{BlockSize: 4})
 	if err != nil {
 		t.Fatal(err)
