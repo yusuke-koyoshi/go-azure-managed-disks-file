@@ -17,7 +17,16 @@ func main() {
 	offset := flag.Int64("offset", 0, "byte offset")
 	length := flag.Int("length", 512, "number of bytes")
 	skipChecksum := flag.Bool("skip-checksum", false, "skip per-range MD5 validation")
+	formatName := flag.String("format", "auto", "blob format: auto, vhd or vhdx")
 	flag.Parse()
+	format, ok := map[string]azurediskfile.Format{
+		"auto": azurediskfile.FormatAuto,
+		"vhd":  azurediskfile.FormatVHD,
+		"vhdx": azurediskfile.FormatVHDX,
+	}[*formatName]
+	if !ok {
+		log.Fatalf("unknown -format %q: want auto, vhd or vhdx", *formatName)
+	}
 	if *urlValue == "" && flag.NArg() > 0 {
 		*urlValue = flag.Arg(0)
 	}
@@ -25,7 +34,7 @@ func main() {
 		*urlValue = os.Getenv("AZURE_SAS_URL")
 	}
 	if *urlValue == "" {
-		fmt.Fprintln(os.Stderr, "usage: AZURE_SAS_URL='...' azure-disk-hexdump [-offset N] [-length N] [-skip-checksum]")
+		fmt.Fprintln(os.Stderr, "usage: AZURE_SAS_URL='...' azure-disk-hexdump [-offset N] [-length N] [-format auto|vhd|vhdx] [-skip-checksum]")
 		fmt.Fprintln(os.Stderr, "       azure-disk-hexdump -url SAS_URL [-offset N] [-length N] (legacy)")
 		os.Exit(2)
 	}
@@ -38,7 +47,7 @@ func main() {
 		options = append(options, azurediskfile.WithoutRangeChecksum())
 	}
 	api := azurediskfile.NewSASBlobAPI(*urlValue, options...)
-	reader, err := azurediskfile.Open(context.Background(), api, nil)
+	reader, err := azurediskfile.OpenWithOptions(context.Background(), api, nil, azurediskfile.OpenOptions{Format: format})
 	if err != nil {
 		log.Fatal(err)
 	}

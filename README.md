@@ -163,21 +163,6 @@ The equivalents are `snapshot.Options.SkipRangeChecksum` and the
 api := azurediskfile.NewSASBlobAPI(sasURL, azurediskfile.WithoutRangeChecksum())
 ```
 
-### VHDX
-
-Azure exports a snapshot with a 4096-byte logical sector size, such as one of
-a Premium SSD v2 or an Ultra Disk, only as VHDX, and rejects the grant unless
-the request asks for it. The `snapshot` package asks for VHDX for such a
-snapshot and reads the virtual disk inside it, whose size is the reader's
-size. A VHD blob is read as is, so its size includes the 512-byte footer.
-Differencing disks and files with a log to replay are rejected. The disk keeps
-its 4096-byte sectors, so its GPT header is at offset 4096 rather than 512.
-
-`Open` reads a blob that starts with the VHDX file identifier as VHDX. Set
-`OpenOptions.Format` when the format is known, as the `snapshot` package does:
-the start of a VHD blob is the disk's first sector, which whoever controls the
-disk can write.
-
 The verification CLI accepts its SAS URL from `AZURE_SAS_URL` (preferred, so
 the URL is not placed in the command line), while the legacy `-url` flag and
 positional argument remain supported:
@@ -185,6 +170,23 @@ positional argument remain supported:
 ```sh
 AZURE_SAS_URL='https://...' go run ./cmd/azure-disk-hexdump -offset 0 -length 512
 ```
+
+### VHDX
+
+Azure exports a snapshot with a 4096-byte logical sector size, such as one of
+a Premium SSD v2 or an Ultra Disk, only as VHDX, and rejects the grant unless
+the request asks for it. The `snapshot` package asks for VHDX for such a
+snapshot and reads the virtual disk inside it, whose size is the reader's
+size. A VHD blob is read as is, so its size includes the 512-byte footer.
+Differencing disks, files with a log to replay and payload blocks that share
+file space are rejected. The disk keeps its 4096-byte sectors, so its GPT
+header is at offset 4096 rather than 512.
+
+`Open` reads a blob that starts with the VHDX file identifier as VHDX. Set
+`OpenOptions.Format` when the format is known, as the `snapshot` package does:
+the start of a VHD blob is the disk's first sector, which whoever controls the
+disk can write. The verification CLI takes the format from `-format auto`,
+`vhd` or `vhdx`.
 
 ## Integration tests
 
