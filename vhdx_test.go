@@ -207,7 +207,7 @@ func TestOpenVHDXMapsPageRanges(t *testing.T) {
 func TestOpenVHDXKeysTheCacheApartFromTheBlob(t *testing.T) {
 	cache := &testCache{values: map[string][]byte{}}
 	blob := &vhdxBlob{head: loadAzureVHDX(t)}
-	raw, err := OpenWithOptions(t.Context(), blob, cache, OpenOptions{Format: FormatRaw})
+	raw, err := OpenWithOptions(t.Context(), blob, cache, OpenOptions{Format: FormatVHD})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -221,9 +221,9 @@ func TestOpenVHDXKeysTheCacheApartFromTheBlob(t *testing.T) {
 	wantVHDXPattern(t, readVHDXAt(t, vhdx, 0, 8), azureVHDXDataOffset)
 }
 
-func TestOpenFormatRawReadsAVHDXBlobAsIs(t *testing.T) {
+func TestOpenFormatVHDReadsAVHDXBlobAsIs(t *testing.T) {
 	blob := &vhdxBlob{head: loadAzureVHDX(t)}
-	reader, err := OpenWithOptions(t.Context(), blob, nil, OpenOptions{Format: FormatRaw})
+	reader, err := OpenWithOptions(t.Context(), blob, nil, OpenOptions{Format: FormatVHD})
 	if err != nil {
 		t.Fatal(err)
 	}

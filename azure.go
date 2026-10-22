@@ -86,11 +86,11 @@ type Format int
 
 const (
 	// FormatAuto reads a blob that starts with the VHDX file identifier as
-	// FormatVHDX and any other blob as FormatRaw.
+	// FormatVHDX and any other blob as FormatVHD.
 	FormatAuto Format = iota
-	// FormatRaw reads the blob as is. A VHD export is read this way, so its
-	// size includes the 512-byte footer.
-	FormatRaw
+	// FormatVHD reads the blob as is. A VHD export is the disk followed by a
+	// 512-byte footer, so the reader's size includes the footer.
+	FormatVHD
 	// FormatVHDX reads the virtual disk inside a VHDX blob.
 	FormatVHDX
 )
@@ -154,7 +154,7 @@ func OpenWithOptions(ctx context.Context, api BlobAPI, cache Cache[string, []byt
 	if _, ok := api.(*vhdxBlobAPI); ok {
 		id = "vhdx:" + id
 	} else {
-		id = "raw:" + id
+		id = "vhd:" + id
 	}
 	r := &blobReader{
 		ctx:            ctx,

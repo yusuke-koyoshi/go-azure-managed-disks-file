@@ -264,7 +264,7 @@ func grantAccessAndOpen(
 		activeBy: time.Now().Add(sasActivationTimeout),
 	}
 	openOptions := options.Open
-	openOptions.Format = azurediskfile.FormatRaw
+	openOptions.Format = azurediskfile.FormatVHD
 	if fileFormat == armcompute.FileFormatVHDX {
 		openOptions.Format = azurediskfile.FormatVHDX
 	}

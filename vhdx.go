@@ -82,7 +82,7 @@ type vhdxRegion struct {
 
 func unwrapVHDX(ctx context.Context, api BlobAPI, size int64, format Format) (BlobAPI, int64, error) {
 	switch format {
-	case FormatRaw:
+	case FormatVHD:
 		return api, size, nil
 	case FormatAuto:
 		if size < vhdxHeadSize {
