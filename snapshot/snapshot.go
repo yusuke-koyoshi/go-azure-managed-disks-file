@@ -88,8 +88,33 @@ type snapshotClient interface {
 
 // snapshotProperties holds "" and 0 for what ARM does not return.
 type snapshotProperties struct {
+	UniqueID          string
 	DiskState         string
 	LogicalSectorSize int32
+}
+
+// logicalSectorSize decides both the grant's file format and the size that
+// Describe reports, so the two cannot disagree. ARM returns no size for
+// snapshots that predate it, which have 512-byte sectors.
+func logicalSectorSize(properties snapshotProperties) (int, error) {
+	switch properties.LogicalSectorSize {
+	case 0, 512:
+		return 512, nil
+	case 4096:
+		return 4096, nil
+	default:
+		return 0, fmt.Errorf("snapshot: unsupported logical sector size %d", properties.LogicalSectorSize)
+	}
+}
+
+// Info is what Describe returns about a snapshot.
+type Info struct {
+	// UniqueID changes when the snapshot is deleted and recreated under the
+	// same name.
+	UniqueID string
+	// LogicalSectorSize is the logical sector size of the disk in bytes: 512
+	// or 4096.
+	LogicalSectorSize int
 }
 
 // GrantAccessAndOpen grants a read SAS for 20 minutes and opens the snapshot
@@ -138,30 +163,49 @@ func GrantAccessAndOpenWithOptions(
 	return grantAccessAndOpen(ctx, snapshots, durationSeconds, cache, options)
 }
 
-// UniqueID returns the uniqueId of the snapshot. Unlike the resource ID, it
-// changes when a snapshot is deleted and recreated under the same name, so it
-// can key results cached for the snapshot. The snapshot can be recreated
-// between this call and a later grant, so a caller that keys a cache by the
-// result can call it again afterwards and compare. Only
+// Describe returns the uniqueId and the logical sector size of the snapshot
+// with one ARM call. Unlike the resource ID, the uniqueId changes when a
+// snapshot is deleted and recreated under the same name, so it can key results
+// cached for the snapshot. The snapshot can be recreated between this call and
+// a later grant, so a caller that keys a cache by the result can call it again
+// afterwards and compare. A disk with 4096-byte sectors keeps them in the
+// reader, so a partition table parser needs LogicalSectorSize. Only
 // options.PerRetryPolicies and options.Transport are used; it takes Options so
 // that callers can pass the value they pass to GrantAccessAndOpenWithOptions.
-func UniqueID(ctx context.Context, cred azcore.TokenCredential, resourceID string, options Options) (string, error) {
+func Describe(ctx context.Context, cred azcore.TokenCredential, resourceID string, options Options) (Info, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	snapshots, err := newARMSnapshotClient(cred, resourceID, options)
 	if err != nil {
-		return "", err
+		return Info{}, err
 	}
-	resp, err := snapshots.client.Get(ctx, snapshots.resourceGroup, snapshots.name, nil)
+	return describe(ctx, snapshots)
+}
+
+func describe(ctx context.Context, client snapshotClient) (Info, error) {
+	properties, err := client.Properties(ctx)
+	if err != nil {
+		return Info{}, err
+	}
+	// An empty ID would key the cache by the reusable resource ID alone.
+	if properties.UniqueID == "" {
+		return Info{}, errors.New("snapshot: the snapshot has no uniqueId")
+	}
+	sectorSize, err := logicalSectorSize(properties)
+	if err != nil {
+		return Info{}, err
+	}
+	return Info{UniqueID: properties.UniqueID, LogicalSectorSize: sectorSize}, nil
+}
+
+// UniqueID returns the uniqueId that Describe returns.
+func UniqueID(ctx context.Context, cred azcore.TokenCredential, resourceID string, options Options) (string, error) {
+	info, err := Describe(ctx, cred, resourceID, options)
 	if err != nil {
 		return "", err
 	}
-	// An empty ID would key the cache by the reusable resource ID alone.
-	if resp.Properties == nil || resp.Properties.UniqueID == nil || *resp.Properties.UniqueID == "" {
-		return "", errors.New("snapshot: the snapshot has no uniqueId")
-	}
-	return *resp.Properties.UniqueID, nil
+	return info.UniqueID, nil
 }
 
 func newARMSnapshotClient(cred azcore.TokenCredential, resourceID string, options Options) (*armSnapshotClient, error) {
@@ -235,10 +279,14 @@ func grantAccessAndOpen(
 			return nil, nil, fmt.Errorf("%w (diskState %s)", ErrSnapshotInUse, state)
 		}
 	}
+	sectorSize, err := logicalSectorSize(properties)
+	if err != nil {
+		return nil, nil, err
+	}
 	// Azure exports a snapshot with 4096-byte sectors only as VHDX, and
 	// rejects the grant without the format.
 	var fileFormat armcompute.FileFormat
-	if properties.LogicalSectorSize == 4096 {
+	if sectorSize == 4096 {
 		fileFormat = armcompute.FileFormatVHDX
 	}
 
@@ -322,6 +370,9 @@ func (c *armSnapshotClient) Properties(ctx context.Context) (snapshotProperties,
 	}
 	var properties snapshotProperties
 	if p := resp.Properties; p != nil {
+		if p.UniqueID != nil {
+			properties.UniqueID = *p.UniqueID
+		}
 		if p.DiskState != nil {
 			properties.DiskState = string(*p.DiskState)
 		}

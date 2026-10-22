@@ -199,6 +199,21 @@ func TestIntegrationVHDX(t *testing.T) {
 	waitForForbidden(t, reader)
 }
 
+func TestIntegrationDescribe(t *testing.T) {
+	for variable, want := range map[string]int{"AZURE_SNAPSHOT_ID": 512, "AZURE_VHDX_SNAPSHOT_ID": 4096} {
+		t.Run(variable, func(t *testing.T) {
+			cred, resourceID := integrationTargetFrom(t, variable)
+			info, err := Describe(t.Context(), cred, resourceID, Options{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if info.UniqueID == "" || info.LogicalSectorSize != want {
+				t.Fatalf("Describe = %+v, want a uniqueId and %d-byte sectors", info, want)
+			}
+		})
+	}
+}
+
 func TestIntegrationUniqueID(t *testing.T) {
 	cred, resourceID := integrationTarget(t)
 	id, err := UniqueID(t.Context(), cred, resourceID, Options{})

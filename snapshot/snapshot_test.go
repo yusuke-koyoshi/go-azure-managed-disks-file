@@ -27,6 +27,7 @@ import (
 // fakeSnapshotClient records the SAS lifecycle calls in the order they happen.
 type fakeSnapshotClient struct {
 	mu             sync.Mutex
+	uniqueID       string
 	state          string
 	sectorSize     int32
 	stateErr       error
@@ -43,7 +44,7 @@ func (c *fakeSnapshotClient) Properties(context.Context) (snapshotProperties, er
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.calls = append(c.calls, "state")
-	return snapshotProperties{DiskState: c.state, LogicalSectorSize: c.sectorSize}, c.stateErr
+	return snapshotProperties{UniqueID: c.uniqueID, DiskState: c.state, LogicalSectorSize: c.sectorSize}, c.stateErr
 }
 
 func (c *fakeSnapshotClient) GrantReadAccess(_ context.Context, durationSeconds int32, fileFormat armcompute.FileFormat) (string, error) {
@@ -212,6 +213,18 @@ func TestGrantAccessAndOpen(t *testing.T) {
 		}
 		if got := client.recorded(); !slices.Equal(got, []string{"state", "grant"}) {
 			t.Errorf("calls = %v, want the state read and the grant", got)
+		}
+	})
+
+	t.Run("neither grants nor revokes for an unsupported sector size", func(t *testing.T) {
+		client := newFakeClient(t, data)
+		client.sectorSize = 1024
+		_, _, err := grantAccessAndOpen(t.Context(), client, durationSeconds, nil, Options{})
+		if err == nil || !strings.Contains(err.Error(), "unsupported logical sector size 1024") {
+			t.Fatalf("error = %v, want the unsupported sector size", err)
+		}
+		if got := client.recorded(); !slices.Equal(got, []string{"state"}) {
+			t.Errorf("calls = %v, want only the state read", got)
 		}
 	})
 
@@ -562,6 +575,45 @@ func (r *attemptRecorder) recorded() []string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return append([]string(nil), r.attempts...)
+}
+
+func TestDescribe(t *testing.T) {
+	const uniqueID = "2f0c4a0e-0000-4000-8000-000000000001"
+	for _, test := range []struct {
+		name       string
+		uniqueID   string
+		sectorSize int32
+		want       int
+		wantErr    string
+	}{
+		{name: "no sector size", uniqueID: uniqueID, want: 512},
+		{name: "512", uniqueID: uniqueID, sectorSize: 512, want: 512},
+		{name: "4096", uniqueID: uniqueID, sectorSize: 4096, want: 4096},
+		{name: "unsupported sector size", uniqueID: uniqueID, sectorSize: 1024, wantErr: "unsupported logical sector size 1024"},
+		{name: "no uniqueId", sectorSize: 512, wantErr: "no uniqueId"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			client := &fakeSnapshotClient{uniqueID: test.uniqueID, sectorSize: test.sectorSize}
+			info, err := describe(t.Context(), client)
+			if test.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), test.wantErr) {
+					t.Fatalf("error = %v, want it to contain %q", err, test.wantErr)
+				}
+				return
+			}
+			if want := (Info{UniqueID: uniqueID, LogicalSectorSize: test.want}); err != nil || info != want {
+				t.Fatalf("describe = %+v, %v; want %+v", info, err, want)
+			}
+		})
+	}
+
+	t.Run("disk resource ID", func(t *testing.T) {
+		_, err := Describe(t.Context(), &azfake.TokenCredential{},
+			"/subscriptions/sub/resourceGroups/rg/providers/Microsoft.Compute/disks/snap", Options{})
+		if err == nil || !strings.Contains(err.Error(), "must identify a snapshot") {
+			t.Fatalf("error = %v, want the resource ID error", err)
+		}
+	})
 }
 
 func TestUniqueID(t *testing.T) {

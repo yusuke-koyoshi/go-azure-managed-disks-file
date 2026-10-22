@@ -87,9 +87,12 @@ responses that never reach the caller. `Transport` replaces the HTTP transport
 of both the ARM and the blob clients, for example for tests or a proxy; the
 retry and per-retry policies still run in front of it.
 
-`snapshot.UniqueID` returns the snapshot's `uniqueId`. A resource ID is reused
-when a snapshot is deleted and recreated under the same name, so key results
-cached for a snapshot by its `uniqueId` rather than by the resource ID alone.
+`snapshot.Describe` returns the snapshot's `uniqueId` and logical sector size,
+and `snapshot.UniqueID` the `uniqueId` alone. A resource ID is reused when a
+snapshot is deleted and recreated under the same name, so key results cached
+for a snapshot by its `uniqueId` rather than by the resource ID alone. A disk
+with 4096-byte sectors keeps them in the reader, so pass the sector size to
+whatever parses its partition table.
 
 `Duration: 0` uses a 20-minute SAS. Both `GrantAccessAndOpen` and
 `GrantAccessAndOpenWithOptions` refuse a snapshot that already has an active
