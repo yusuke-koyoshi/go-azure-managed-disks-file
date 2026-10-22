@@ -23,9 +23,14 @@ func (noCache) Get(string) ([]byte, bool) { return nil, false }
 
 func integrationTarget(t *testing.T) (azcore.TokenCredential, string) {
 	t.Helper()
-	resourceID := os.Getenv("AZURE_SNAPSHOT_ID")
+	return integrationTargetFrom(t, "AZURE_SNAPSHOT_ID")
+}
+
+func integrationTargetFrom(t *testing.T, variable string) (azcore.TokenCredential, string) {
+	t.Helper()
+	resourceID := os.Getenv(variable)
 	if resourceID == "" {
-		t.Skip("AZURE_SNAPSHOT_ID is not set")
+		t.Skip(variable + " is not set")
 	}
 	cred, err := azidentity.NewAzureCLICredential(nil)
 	if err != nil {
@@ -156,15 +161,42 @@ func TestIntegrationStateFollowsSAS(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = cleanup() })
 
-	if state, err := client.State(t.Context()); err != nil || state != string(armcompute.DiskStateActiveSAS) {
-		t.Fatalf("state while granted = %q, %v; want ActiveSAS", state, err)
+	if p, err := client.Properties(t.Context()); err != nil || p.DiskState != string(armcompute.DiskStateActiveSAS) {
+		t.Fatalf("state while granted = %q, %v; want ActiveSAS", p.DiskState, err)
 	}
 	if err := cleanup(); err != nil {
 		t.Fatalf("cleanup: %v", err)
 	}
-	if state, err := client.State(t.Context()); err != nil || state != string(armcompute.DiskStateUnattached) {
-		t.Fatalf("state after revoke = %q, %v; want Unattached", state, err)
+	if p, err := client.Properties(t.Context()); err != nil || p.DiskState != string(armcompute.DiskStateUnattached) {
+		t.Fatalf("state after revoke = %q, %v; want Unattached", p.DiskState, err)
 	}
+}
+
+// A snapshot with 4096-byte sectors is exported as VHDX.
+func TestIntegrationVHDX(t *testing.T) {
+	cred, resourceID := integrationTargetFrom(t, "AZURE_VHDX_SNAPSHOT_ID")
+	reader, cleanup, err := GrantAccessAndOpen(t.Context(), cred, resourceID, noCache{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cleanup() })
+
+	// The GPT header is in LBA 1 and its backup in the last LBA, so both also
+	// check the virtual disk size.
+	for _, off := range []int64{4096, reader.Size() - 4096} {
+		header := make([]byte, 8)
+		if _, err := reader.ReadAt(header, off); err != nil {
+			t.Fatal(err)
+		}
+		if string(header) != "EFI PART" {
+			t.Errorf("offset %d = %q, want EFI PART", off, header)
+		}
+	}
+
+	if err := cleanup(); err != nil {
+		t.Fatalf("cleanup: %v", err)
+	}
+	waitForForbidden(t, reader)
 }
 
 func TestIntegrationUniqueID(t *testing.T) {

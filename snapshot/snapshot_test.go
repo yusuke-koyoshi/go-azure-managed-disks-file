@@ -28,6 +28,7 @@ import (
 type fakeSnapshotClient struct {
 	mu             sync.Mutex
 	state          string
+	sectorSize     int32
 	stateErr       error
 	sas            string
 	grantErr       error
@@ -35,20 +36,22 @@ type fakeSnapshotClient struct {
 	revokeErr      error
 	calls          []string
 	durations      []int32
+	fileFormats    []armcompute.FileFormat
 }
 
-func (c *fakeSnapshotClient) State(context.Context) (string, error) {
+func (c *fakeSnapshotClient) Properties(context.Context) (snapshotProperties, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.calls = append(c.calls, "state")
-	return c.state, c.stateErr
+	return snapshotProperties{DiskState: c.state, LogicalSectorSize: c.sectorSize}, c.stateErr
 }
 
-func (c *fakeSnapshotClient) GrantReadAccess(_ context.Context, durationSeconds int32) (string, error) {
+func (c *fakeSnapshotClient) GrantReadAccess(_ context.Context, durationSeconds int32, fileFormat armcompute.FileFormat) (string, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.calls = append(c.calls, "grant")
 	c.durations = append(c.durations, durationSeconds)
+	c.fileFormats = append(c.fileFormats, fileFormat)
 	if c.grantErr != nil {
 		return "", c.grantErr
 	}
@@ -207,8 +210,23 @@ func TestGrantAccessAndOpen(t *testing.T) {
 		if _, _, err := grantAccessAndOpen(t.Context(), client, durationSeconds, nil, Options{SkipActiveSASCheck: true}); err != nil {
 			t.Fatal(err)
 		}
-		if got := client.recorded(); !slices.Equal(got, []string{"grant"}) {
-			t.Errorf("calls = %v, want only the grant", got)
+		if got := client.recorded(); !slices.Equal(got, []string{"state", "grant"}) {
+			t.Errorf("calls = %v, want the state read and the grant", got)
+		}
+	})
+
+	t.Run("grants VHDX only for 4096-byte sectors", func(t *testing.T) {
+		for sectorSize, want := range map[int32]armcompute.FileFormat{
+			0: "", 512: "", 4096: armcompute.FileFormatVHDX,
+		} {
+			client := newFakeClient(t, data)
+			client.sectorSize = sectorSize
+			if _, _, err := grantAccessAndOpen(t.Context(), client, durationSeconds, nil, Options{}); err != nil {
+				t.Fatalf("sector size %d: %v", sectorSize, err)
+			}
+			if got := client.fileFormats; !slices.Equal(got, []armcompute.FileFormat{want}) {
+				t.Errorf("sector size %d: file formats = %q, want [%q]", sectorSize, got, want)
+			}
 		}
 	})
 
@@ -712,6 +730,61 @@ func TestGrantAccessAndOpenWithOptionsPerRetryPolicies(t *testing.T) {
 	if n := router.blobRequests.Load(); n != 3 {
 		t.Errorf("the transport saw %d blob requests, want 3", n)
 	}
+}
+
+func TestARMSnapshotClientFileFormat(t *testing.T) {
+	for _, sectorSize := range []int32{512, 4096} {
+		var sent *armcompute.FileFormat
+		server := &fake.SnapshotsServer{
+			Get: func(context.Context, string, string, *armcompute.SnapshotsClientGetOptions) (resp azfake.Responder[armcompute.SnapshotsClientGetResponse], errResp azfake.ErrorResponder) {
+				resp.SetResponse(http.StatusOK, armcompute.SnapshotsClientGetResponse{
+					Snapshot: armcompute.Snapshot{Properties: &armcompute.SnapshotProperties{
+						CreationData: &armcompute.CreationData{LogicalSectorSize: &sectorSize},
+					}},
+				}, nil)
+				return
+			},
+			BeginGrantAccess: func(_ context.Context, _, _ string, data armcompute.GrantAccessData, _ *armcompute.SnapshotsClientBeginGrantAccessOptions) (resp azfake.PollerResponder[armcompute.SnapshotsClientGrantAccessResponse], errResp azfake.ErrorResponder) {
+				sent = data.FileFormat
+				sas := "https://blob.invalid/blob"
+				resp.SetTerminalResponse(http.StatusOK, armcompute.SnapshotsClientGrantAccessResponse{
+					AccessURI: armcompute.AccessURI{AccessSAS: &sas},
+				}, nil)
+				return
+			},
+		}
+		client, err := newARMSnapshotClient(&azfake.TokenCredential{},
+			"/subscriptions/sub/resourceGroups/rg/providers/Microsoft.Compute/snapshots/snap",
+			Options{Transport: fake.NewSnapshotsServerTransport(server)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		properties, err := client.Properties(t.Context())
+		if err != nil || properties.LogicalSectorSize != sectorSize {
+			t.Fatalf("logical sector size = %d, %v; want %d", properties.LogicalSectorSize, err, sectorSize)
+		}
+		var fileFormat armcompute.FileFormat
+		if sectorSize == 4096 {
+			fileFormat = armcompute.FileFormatVHDX
+		}
+		if _, err := client.GrantReadAccess(t.Context(), 60, fileFormat); err != nil {
+			t.Fatal(err)
+		}
+		if got := ptrValue(sent); got != fileFormat {
+			t.Errorf("sector size %d: sent file format %q, want %q", sectorSize, got, fileFormat)
+		}
+		if fileFormat == "" && sent != nil {
+			t.Errorf("sector size %d: sent a file format, want none", sectorSize)
+		}
+	}
+}
+
+func ptrValue[T any](p *T) T {
+	var zero T
+	if p == nil {
+		return zero
+	}
+	return *p
 }
 
 func TestGrantAccessAndOpenWithOptions(t *testing.T) {

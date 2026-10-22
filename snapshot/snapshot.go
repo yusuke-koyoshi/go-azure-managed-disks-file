@@ -40,8 +40,6 @@ type Options struct {
 	SkipRevokeOnCleanup bool
 	// SkipActiveSASCheck grants access even when the snapshot already has an
 	// active SAS, replacing it. Set it only when no other reader can exist.
-	// It also drops the need for the Microsoft.Compute/snapshots/read
-	// permission, which granting and revoking do not otherwise use.
 	SkipActiveSASCheck bool
 	// SkipRangeChecksum disables per-range MD5 validation when true. Validation
 	// fails closed, so this is the fallback for export endpoints that do not
@@ -82,10 +80,16 @@ var ErrSnapshotInUse = errors.New("snapshot: the snapshot already has an active 
 // It covers the SAS lifecycle, which is the security-relevant behavior here,
 // and lets that lifecycle be exercised without ARM.
 type snapshotClient interface {
-	// State returns the snapshot's diskState, or "" when ARM returns none.
-	State(ctx context.Context) (string, error)
-	GrantReadAccess(ctx context.Context, durationSeconds int32) (string, error)
+	Properties(ctx context.Context) (snapshotProperties, error)
+	// GrantReadAccess omits the file format when fileFormat is "".
+	GrantReadAccess(ctx context.Context, durationSeconds int32, fileFormat armcompute.FileFormat) (string, error)
 	RevokeAccess(ctx context.Context) error
+}
+
+// snapshotProperties holds "" and 0 for what ARM does not return.
+type snapshotProperties struct {
+	DiskState         string
+	LogicalSectorSize int32
 }
 
 // GrantAccessAndOpen grants a read SAS for 20 minutes and opens the snapshot
@@ -219,20 +223,26 @@ func grantAccessAndOpen(
 	cache azurediskfile.Cache[string, []byte],
 	options Options,
 ) (*io.SectionReader, func() error, error) {
+	properties, err := client.Properties(ctx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("snapshot: read the snapshot: %w", err)
+	}
 	// Return without revoking: a revocation would withdraw the other SAS too.
 	if !options.SkipActiveSASCheck {
-		state, err := client.State(ctx)
-		if err != nil {
-			return nil, nil, fmt.Errorf("snapshot: read the snapshot state: %w", err)
-		}
-		switch armcompute.DiskState(state) {
+		switch state := armcompute.DiskState(properties.DiskState); state {
 		case armcompute.DiskStateActiveSAS, armcompute.DiskStateActiveSASFrozen,
 			armcompute.DiskStateActiveUpload, armcompute.DiskStateReadyToUpload:
 			return nil, nil, fmt.Errorf("%w (diskState %s)", ErrSnapshotInUse, state)
 		}
 	}
+	// Azure exports a snapshot with 4096-byte sectors only as VHDX, and
+	// rejects the grant without the format.
+	var fileFormat armcompute.FileFormat
+	if properties.LogicalSectorSize == 4096 {
+		fileFormat = armcompute.FileFormatVHDX
+	}
 
-	sas, err := client.GrantReadAccess(ctx, durationSeconds)
+	sas, err := client.GrantReadAccess(ctx, durationSeconds, fileFormat)
 	if err != nil {
 		// The grant can fail while polling after ARM has already issued the SAS.
 		return nil, nil, errors.Join(err, revokeDetached(client))
@@ -300,23 +310,33 @@ type armSnapshotClient struct {
 	name          string
 }
 
-func (c *armSnapshotClient) State(ctx context.Context) (string, error) {
+func (c *armSnapshotClient) Properties(ctx context.Context) (snapshotProperties, error) {
 	resp, err := c.client.Get(ctx, c.resourceGroup, c.name, nil)
 	if err != nil {
-		return "", err
+		return snapshotProperties{}, err
 	}
-	if resp.Properties == nil || resp.Properties.DiskState == nil {
-		return "", nil
+	var properties snapshotProperties
+	if p := resp.Properties; p != nil {
+		if p.DiskState != nil {
+			properties.DiskState = string(*p.DiskState)
+		}
+		if p.CreationData != nil && p.CreationData.LogicalSectorSize != nil {
+			properties.LogicalSectorSize = *p.CreationData.LogicalSectorSize
+		}
 	}
-	return string(*resp.Properties.DiskState), nil
+	return properties, nil
 }
 
-func (c *armSnapshotClient) GrantReadAccess(ctx context.Context, durationSeconds int32) (string, error) {
-	poller, err := c.client.BeginGrantAccess(ctx, c.resourceGroup, c.name, armcompute.GrantAccessData{
+func (c *armSnapshotClient) GrantReadAccess(ctx context.Context, durationSeconds int32, fileFormat armcompute.FileFormat) (string, error) {
+	data := armcompute.GrantAccessData{
 		Access:                   new(armcompute.AccessLevelRead),
 		DurationInSeconds:        new(durationSeconds),
 		GetSecureVMGuestStateSAS: new(false),
-	}, nil)
+	}
+	if fileFormat != "" {
+		data.FileFormat = &fileFormat
+	}
+	poller, err := c.client.BeginGrantAccess(ctx, c.resourceGroup, c.name, data, nil)
 	if err != nil {
 		return "", err
 	}

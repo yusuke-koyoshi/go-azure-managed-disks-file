@@ -85,6 +85,10 @@ type OpenOptions struct {
 // does not provide BlobIdentifier, the reader gets a unique identity and its
 // blocks are not shared with other readers through a shared cache.
 //
+// A blob that starts with the VHDX file identifier is read as the virtual disk
+// inside it, so the reader's size is the virtual disk size. A VHD blob is read
+// as is, so its size includes the 512-byte footer.
+//
 // A panic in api or cache while a block is fetched ends the process when the
 // fetch runs in a goroutine started by the reader: in a read that fetches
 // several blocks, and in read-ahead. A read that fetches one block raises it
@@ -107,6 +111,10 @@ func OpenWithOptions(ctx context.Context, api BlobAPI, cache Cache[string, []byt
 	}
 	if size < 0 {
 		return nil, fmt.Errorf("azurediskfile: invalid blob size %d", size)
+	}
+	api, size, err = unwrapVHDX(ctx, api, size)
+	if err != nil {
+		return nil, err
 	}
 	if options.BlockSize <= 0 {
 		options.BlockSize = DefaultBlockSize

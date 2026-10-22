@@ -106,9 +106,10 @@ snapshot already has an active SAS or upload. Two readers that check before
 either grants can still both grant, and the later grant cuts off the earlier
 reader, so give each reader its own snapshot. A SAS left behind by a crashed
 process keeps the snapshot refused until it is revoked
-(`az snapshot revoke-access`) or replaced with `SkipActiveSASCheck`. The check
-reads the snapshot, so the credential needs `Microsoft.Compute/snapshots/read`
-in addition to `Microsoft.Compute/snapshots/beginGetAccess/action` and
+(`az snapshot revoke-access`) or replaced with `SkipActiveSASCheck`. The
+package reads the snapshot before granting, for this check and for its logical
+sector size, so the credential needs `Microsoft.Compute/snapshots/read` in
+addition to `Microsoft.Compute/snapshots/beginGetAccess/action` and
 `Microsoft.Compute/snapshots/endGetAccess/action`.
 
 The snapshot's export settings must allow reading with the SAS alone. A
@@ -159,6 +160,18 @@ The equivalents are `snapshot.Options.SkipRangeChecksum` and the
 api := azurediskfile.NewSASBlobAPI(sasURL, azurediskfile.WithoutRangeChecksum())
 ```
 
+### VHDX
+
+Azure exports a snapshot with a 4096-byte logical sector size, such as one of
+a Premium SSD v2 or an Ultra Disk, only as VHDX, and rejects the grant unless
+the request asks for it. The `snapshot` package asks for VHDX for such a
+snapshot, and `Open` reads any blob that starts with the VHDX file identifier
+as the virtual disk inside it. The reader's size is then the virtual disk
+size, while a VHD blob is read as is, so its size includes the 512-byte
+footer. Differencing disks and files with a log to replay are rejected. The
+disk keeps its 4096-byte sectors, so its GPT header is at offset 4096 rather
+than 512.
+
 The verification CLI accepts its SAS URL from `AZURE_SAS_URL` (preferred, so
 the URL is not placed in the command line), while the legacy `-url` flag and
 positional argument remain supported:
@@ -178,6 +191,9 @@ snapshot must hold a GPT disk image, and no one else may be reading it.
 AZURE_SNAPSHOT_ID=/subscriptions/.../providers/Microsoft.Compute/snapshots/NAME \
   go test -tags integration ./snapshot
 ```
+
+`AZURE_VHDX_SNAPSHOT_ID` additionally runs the VHDX test against a GPT
+snapshot with a 4096-byte logical sector size.
 
 ## Packages
 
