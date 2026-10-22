@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/crc32"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -166,6 +167,20 @@ func openVHDX(ctx context.Context, inner BlobAPI, fileSize int64) (*vhdxBlobAPI,
 			fileOffsets[block] = offset
 		default:
 			return nil, fmt.Errorf("azurediskfile: VHDX: payload block %d has unsupported state %d", block, state)
+		}
+	}
+	// [MS-VHDX] forbids payload blocks that share file space, and PageRanges
+	// would otherwise repeat a blob range once for every such block.
+	present := make([]int64, 0, blocks)
+	for _, offset := range fileOffsets {
+		if offset >= 0 {
+			present = append(present, offset)
+		}
+	}
+	slices.Sort(present)
+	for i := 1; i < len(present); i++ {
+		if present[i]-present[i-1] < blockSize {
+			return nil, fmt.Errorf("azurediskfile: VHDX: payload blocks at %d and %d overlap", present[i-1], present[i])
 		}
 	}
 	return &vhdxBlobAPI{inner: inner, size: size, blockSize: blockSize, fileOffsets: fileOffsets}, nil

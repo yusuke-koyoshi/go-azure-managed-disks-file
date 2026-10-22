@@ -321,6 +321,13 @@ func TestOpenVHDXRejects(t *testing.T) {
 		{"a block in the header section", func(head []byte) {
 			setVHDXBATEntry(head, 0, vhdxBlockFullyPresent)
 		}, "outside"},
+		{"two blocks at one offset", func(head []byte) {
+			setVHDXBATEntry(head, 1, 6<<20|vhdxBlockFullyPresent)
+		}, "overlap"},
+		// The export lays the blocks out exactly one block size apart.
+		{"blocks less than a block size apart", func(head []byte) {
+			setVHDXBATEntry(head, 1, 261<<20|vhdxBlockFullyPresent)
+		}, "overlap"},
 		{"a large metadata region", func(head []byte) {
 			for _, off := range vhdxRegionTableOffsets {
 				table := head[off : off+vhdxRegionTableSize]
