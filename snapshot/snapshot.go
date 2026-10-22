@@ -186,7 +186,7 @@ func Describe(ctx context.Context, cred azcore.TokenCredential, resourceID strin
 func describe(ctx context.Context, client snapshotClient) (Info, error) {
 	properties, err := client.Properties(ctx)
 	if err != nil {
-		return Info{}, err
+		return Info{}, fmt.Errorf("snapshot: read the snapshot: %w", err)
 	}
 	// An empty ID would key the cache by the reusable resource ID alone.
 	if properties.UniqueID == "" {

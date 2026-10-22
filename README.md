@@ -191,15 +191,16 @@ AZURE_SAS_URL='https://...' go run ./cmd/azure-disk-hexdump -offset 0 -length 51
 The `snapshot` package has tests that grant and revoke access on a real
 snapshot. They run only with the `integration` build tag and an
 `AZURE_SNAPSHOT_ID`, and they authenticate with the Azure CLI login. The
-snapshot must hold a GPT disk image, and no one else may be reading it.
+snapshot must hold a GPT disk image with 512-byte sectors, and no one else may
+be reading it.
 
 ```sh
 AZURE_SNAPSHOT_ID=/subscriptions/.../providers/Microsoft.Compute/snapshots/NAME \
   go test -tags integration ./snapshot
 ```
 
-`AZURE_VHDX_SNAPSHOT_ID` additionally runs the VHDX test against a GPT
-snapshot with a 4096-byte logical sector size.
+`AZURE_VHDX_SNAPSHOT_ID` additionally runs the VHDX and `Describe` tests
+against a GPT snapshot with a 4096-byte logical sector size.
 
 ## Packages
 

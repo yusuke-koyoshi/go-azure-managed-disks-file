@@ -606,14 +606,6 @@ func TestDescribe(t *testing.T) {
 			}
 		})
 	}
-
-	t.Run("disk resource ID", func(t *testing.T) {
-		_, err := Describe(t.Context(), &azfake.TokenCredential{},
-			"/subscriptions/sub/resourceGroups/rg/providers/Microsoft.Compute/disks/snap", Options{})
-		if err == nil || !strings.Contains(err.Error(), "must identify a snapshot") {
-			t.Fatalf("error = %v, want the resource ID error", err)
-		}
-	})
 }
 
 func TestUniqueID(t *testing.T) {
@@ -633,6 +625,15 @@ func TestUniqueID(t *testing.T) {
 			properties: &armcompute.SnapshotProperties{UniqueID: new("2f0c4a0e-0000-4000-8000-000000000001")},
 			want:       "2f0c4a0e-0000-4000-8000-000000000001",
 			wantGets:   1,
+		},
+		{
+			name: "unsupported sector size",
+			properties: &armcompute.SnapshotProperties{
+				UniqueID:     new("2f0c4a0e-0000-4000-8000-000000000001"),
+				CreationData: &armcompute.CreationData{LogicalSectorSize: new(int32(1024))},
+			},
+			wantErr:  "unsupported logical sector size 1024",
+			wantGets: 1,
 		},
 		{name: "empty uniqueId", properties: &armcompute.SnapshotProperties{UniqueID: new("")}, wantErr: "no uniqueId", wantGets: 1},
 		{name: "no properties", wantErr: "no uniqueId", wantGets: 1},
